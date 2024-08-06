@@ -1,0 +1,31 @@
+# Example input
+## Required params
+LABEL   = pyridine
+Z0      = 2.7
+ZF      = 4.5
+### optional
+ZREF   = 3.0
+
+CMD = mpirun vasp_gam
+PSEUDOS = potpaw_PBE.54
+SAMPLEGRID = True
+TIPGRID = True
+
+## Relaxation params
+ALPHA   = 1.08
+V       = 42.9071
+
+OPT = False
+
+&SITES
+N        6.7296     5.932899
+C        8.0878     5.898899
+H        8.572899   4.999999
+C1       8.1089     8.3219
+N-C      7.4087     5.915899
+C-C      8.450949   6.501849
+hollow   7.410616   7.11245
+lp       6.1965     5.049
+
+&VASP
+$NPAR = 8

@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from datetime import datetime as dt
+from argparse import ArgumentParser, Namespace
+from importlib import import_module
+import numpy as np
+from mpi4py import MPI
+from tricubic import tricubic
+from pydbspm.grid import sph2cart, get_grid_from_params
+from pydbspm.input_parser import parse_params, default_params
+from pydbspm.calculate import DensityCalculator
+from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z
+from pydbspm.setup_calculation import setup_calc, mpirequired
+
+t = dt.now()
+t_str = t.strftime("%Y-%m-%d %H:%M:%S")
+# Checking MPI status
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+comm.Set_errhandler(MPI.ERRORS_ARE_FATAL)
+
+def print(*args, **kwargs):
+        kwargs["flush"] = True
+        return __builtins__.print(*args, **kwargs)
+
+# Parsing command line arguments
+if rank == 0:
+    parser = ArgumentParser(
+        prog="DBSPM",
+        description="Program to run a density-based SPM simulation.\n\nPlease note that command-line arguments will override parameters in the input file.",
+    )
+
+    parser.add_argument(
+        "steps",
+        nargs="*",
+        # dest="STEPS",
+        default=["fullauto"],
+        help="Steps to calculate.",
+    )
+
+    parser.add_argument(
+        "--components",
+        dest="COMPONENTS",
+        nargs="*",
+        help="Labels of the interactions to include in the static potential.",
+    )
+
+    parser.add_argument(
+        "-i",
+        "--input",
+        action="store",
+        type=str,
+        dest="INPUT",
+        help="Input file with simulation parameters.",
+    )
+
+    parser.add_argument(
+        "-s",
+        "--sample",
+        type=str,
+        dest="SAMPLE",
+        help="Sample file. (any type ASE can read)",
+    )
+
+    parser.add_argument(
+        "-t",
+        "--tip",
+        type=str,
+        dest="TIP",
+        help="Tip file with apex at [0,0,0]. (any type ASE can read)",
+    )
+
+    parser.add_argument(
+        "-c",
+        "--calc",
+        dest="CALC",
+        help="DFT program to calculate tip and sample density-properties.",
+    )
+
+    parser.add_argument(
+        "--dft-cmd",
+        dest="CMD",
+        help="Command to run the selected DFT program.",
+    )
+
+    parser.add_argument(
+        "--dft-input",
+        default=None,
+        type=str,
+        dest="DFTINPUT",
+        help="Input file for DFT calculation.",
+    )
+
+    parser.add_argument(
+        "--io",
+        default="npz",
+        dest="IO",
+        choices=["npz", "cube"],
+        help="File format for I/O.",
+    )
+
+    parser.add_argument(
+        "-a",
+        "--alpha",
+        type=float,
+        dest="ALPHA",
+        help="Exponent for Pauli-repuslion (SR) overlap.",
+    )
+
+    parser.add_argument(
+        "-V",
+        type=float,
+        dest="V",
+        help="Pauli-repulsion (SR) scaling parameter.",
+    )
+
+    parser.add_argument(
+        "-k",
+        "--kappa",
+        type=float,
+        dest="K",
+        help="Probe torsion spring constant. [eV/rad]",
+    )
+
+    parser.add_argument(
+        "-r",
+        "--rpivot",
+        type=float,
+        dest="RPIVOT",
+        help="Length of the probe lever. [Ang]",
+    )
+
+    parser.add_argument(
+        "--min-method",
+        type=str,
+        dest="MINMETHOD",
+        help="Minimization method for probe relaxation (choose from scipy.minimize).",
+    )
+
+    options = parser.parse_args()
+
+    print("Density-based SPM")
+    print("SPM-TH @ UAM")
+    print(f"Started on " + t_str)
+    print(f"Calculating on {size} processors.")
+    print("> Parsing command line arguments.")
+
+    for k, v in options.__dict__.items():
+        if v is None:
+            continue
+        print(f"{k:10s} = {v}")
+
+    if options.INPUT:
+        print(f"\n> Reading parameters from {options.INPUT}.")
+        inputparams = parse_params(options.INPUT)
+    else:
+        print("\n> No input file provided, using default parameters.")
+        inputparams = Namespace()
+    print("\n> Setting parameters.")
+    # for k, v in inputparams.__dict__.items():
+    #     if k in options.__dict__.keys() and options.__dict__[k] is not None:
+    #         print(f"{k} read from command-line... Ignoring value.")
+    #     print(f"{k:10s} = {v}")
+    for k, v in default_params.items():
+        if k in options.__dict__.keys() and options.__dict__[k] is not None:
+            print(f"{k:10s} = {str(options.__dict__[k]):20s} (c)")
+        elif k in inputparams.__dict__.keys() and inputparams.__dict__[k] is not None:
+            print(f"{k:10s} = {str(inputparams.__dict__[k]):20s} (i)")
+        else:
+            print(f"{k:10s} = {str(v):20s} (d)")
+    params = default_params.copy()  # 3. Default parameters
+    params.update(inputparams.__dict__)  # 2. Input file
+    for k, v in options.__dict__.items():
+        if k == "steps":
+            continue
+        if v is not None:
+            params[k] = v
+    #    params.update(options.__dict__)  # 1. Command-line arguments
+    params = Namespace(**params)
+
+    print("\n> Setting up calculation steps.")
+    steps = setup_calc(options.steps)
+    print(f"{'Steps':7s} | Calculate")
+    print("-" * 20)
+    for k, v in steps.__dict__.items():
+        print(f"{k:7s} | " + str(v).capitalize())
+    steptime = dict()
+
+    calc_steps = [k for k, v in steps.__dict__.items() if v]
+
+    if any(frozenset(calc_steps).intersection(mpirequired)):
+        print("\nMPI is required for the following steps:")
+        for i in mpirequired:
+            if i in calc_steps:
+                print(f"- {i}")
+else:
+    params = None
+    steps = None
+
+if size > 1:
+    steps = comm.bcast(steps, root=0)
+    params = comm.bcast(params, root=0)
+    params.COMM = comm
+    comm.Barrier()
+
+if any([steps.sample, steps.tip, steps.grid]):
+    calc = import_module(f"pydbspm.calculators.{params.CALC}")
+
+if rank == 0:
+    print("\n> Starting Densities buffer.")
+    denscalc = DensityCalculator(params)
+    print("< done.")
+
+if steps.sample and rank == 0:
+    print("\n> Calculating sample with {}.".format(params.CALC))
+    tsamp = dt.now()
+    E = calc.calculate_sample(params)
+    steptime['sample'] = dt.now() - tsamp
+    print("< done.\n")
+
+if steps.tip and rank == 0:
+    print("> Calculating tip with {}.".format(params.CALC))
+    ttip = dt.now()
+    E = calc.calculate_tip(params)
+    steptime['tip'] = dt.now() - ttip
+    print("< done.\n")
+
+comm.Barrier()
+
+if steps.grid:
+    if rank == 0:
+        print("> Preparing grids.")
+        tgrid = None
+    if params.SAMPLEGRID:
+        if rank == 0:
+            print("- Reading sample grid")
+            tgrid = dt.now()
+        if params.COMM and rank <= 1:
+            rhoS, potS, gridS = calc.read_sample(params, rank=rank)
+        elif rank == 0:
+            rhoS, potS, gridS = calc.read_sample(params)
+        if rank == 0:
+            gridS.set_density("rhoS", rhoS)
+            gridS.set_density("potS", potS)
+            print("- Saving sample grid")
+            gridS.save(params.SAMPLE / "sample.npz")
+            tgrid_ = dt.now()
+            denscalc.set_sample(gridS)
+
+    if params.TIPGRID and rank == 0:
+        print("- Reading tip grid")
+        if not tgrid:
+            tgrid = dt.now()
+        rhoT, nrhoT, gridT = calc.read_tip(params)
+        gridT.set_density("rhoT", rhoT)
+        gridT.set_density("nrhoT", nrhoT)
+        print("- Saving tip grid")
+        gridT.save(params.TIP / "tip.npz")
+        tgrid_ = dt.now()
+        denscalc.set_tip(gridT)
+        print("< done.\n")
+
+    if rank == 0:
+        steptime['grid'] = tgrid_ - tgrid
+    comm.Barrier()
+
+if steps.sr:
+    if rank == 0:
+        print("> Calculating SR interaction.")
+        tsr = dt.now()
+        if denscalc.rhoS is not None:
+            denscalc.load_sample()
+        if denscalc.rhoT is not None:
+            denscalc.load_tip()
+
+        denscalc.set_calculation_grid()
+        sr = get_density_overlap(rhoS**params.ALPHA, rhoT**params.ALPHA, gridS.dr)
+        sr = sr[denscalc.nidx]
+        denscalc.grid.set_density("sr", sr)
+        print(f"- Saving {params.LABEL}_sr_a{params.ALPHA:.2f}.npz")
+        denscalc.grid.save_density("sr", params.LABEL + f"_sr_a{params.ALPHA:.2f}.npz")
+        steptime['sr'] = dt.now() - tsr
+        print("< done.\n")
+    comm.Barrier()
+
+if steps.es:
+    if rank == 0:
+        print("> Calculating ES interaction.")
+        if denscalc.potS is not None:
+            denscalc.load_sample()
+        if denscalc.nrhoT is not None:
+            denscalc.load_tip()
+        if denscalc.grid is not None:
+            denscalc.set_calculation_grid()
+        tes = dt.now()
+        es = get_density_overlap(denscalc.potS, denscalc.nrhoT, denscalc.gridS.dr)
+        es = es[denscalc.nidx]
+        denscalc.grid.set_density("es", es)
+        print(f"- Saving {params.LABEL}_es.npz")
+        denscalc.grid.save_density("es", params.LABEL + f"_es.npz")
+        steptime['es'] = dt.now() - tes
+        print("< done.\n")
+    comm.Barrier()
+
+if steps.vdw:
+    if rank == 0:
+        print("Calculating vdW interaction.")
+        tvdw = dt.now()
+        if denscalc.sample is not None:
+            denscalc.load_sample()
+        if denscalc.gridT is not None:
+            denscalc.load_tip()
+        if denscalc.grid is not None:
+            denscalc.set_calculation_grid()
+
+        cell = gridS.cell
+        posS = gridS.positions
+        posT = gridT.positions
+        numbersS = gridS.numbers
+        numbersT = gridT.numbers
+
+        ijk = np.indices(gridS.shape, dtype=float).T
+        x, y, z = np.dot(ijk / gridS.shape, gridS.cell).T
+        shape = x[denscalc.nidx].shape
+        gx, gy, gz = (
+            x[denscalc.nidx].flatten(),
+            y[denscalc.nidx].flatten(),
+            z[denscalc.nidx].flatten(),
+        )
+        res_size = gx.size
+        # Prepare parallelization
+        div, res = divmod(res_size, size)
+        ## Number of points for each core
+        count = np.array([div + 1 if p < res else div for p in range(size)])
+        ## Starting index for each core
+        displ = np.array([sum(count[:p]) for p in range(size)])
+    else:
+        cell = None
+        posS = None
+        posT = None
+        numbersS = None
+        numbersT = None
+        gx = None
+        gy = None
+        gz = None
+        res_size = None
+        count = np.zeros(size, dtype=int)
+        displ = None
+
+    # Scatter gridpoints for each core
+    comm.Bcast(count, root=0)
+    par_x, par_y, par_z = np.zeros([3, count[rank]])
+    comm.Scatterv([gx, count, displ, MPI.DOUBLE], par_x, root=0)
+    comm.Scatterv([gy, count, displ, MPI.DOUBLE], par_y, root=0)
+    comm.Scatterv([gz, count, displ, MPI.DOUBLE], par_z, root=0)
+    comm.Barrier()
+
+    # Broadcast necessary data
+    cell = comm.bcast(cell, root=0)
+    posS = comm.bcast(posS, root=0)
+    posT = comm.bcast(posT, root=0)
+    numbersS = comm.bcast(numbersS, root=0)
+    numbersT = comm.bcast(numbersT, root=0)
+    res_size = comm.bcast(res_size, root=0)
+    comm.Barrier()
+
+    if rank == 0:
+        print("\n> Performing DFT-D3 calculation.")
+    res_array = get_dftd3_api_grid(
+        cell, posS, posT, numbersS, numbersT, par_x, par_y, par_z
+    )
+    comm.Barrier()
+    if rank == 0:
+        print("< done.\n")
+        print("> Gathering data...")
+        gatherE = np.zeros(res_size)
+    else:
+        gatherE = None
+
+    comm.Gatherv(res_array, [gatherE, count, displ, MPI.DOUBLE], root=0)
+    if rank == 0:
+        print("< data gathered.\n")
+        gatherE = gatherE.reshape(denscalc.grid.shape)
+        print("> Saving DFT-D3 npz array.")
+        denscalc.grid.set_density("vdw", gatherE)
+        denscalc.grid.save_density("vdw", params.LABEL + "_vdw.npz")
+        steptime['vdw'] = dt.now() - tvdw
+        print("< array saved.\n")
+
+    del res_array
+    comm.Barrier()
+
+if steps.relax:
+    if rank == 0:
+        print("Relaxing probe on static potential.")
+        trelax = dt.now()
+        if denscalc.gridS is not None:
+            denscalc.load_sample()
+        if denscalc.grid is not None:
+            denscalc.set_calculation_grid()
+
+        static = np.zeros(denscalc.grid.shape)
+        for l in params.COMPONENTS:
+            l = l.lower()
+            if l == "sr":
+                sr = np.load(params.LABEL + f"_sr_a{params.ALPHA:.2f}.npz")
+                static += sr["sr"] * params.V
+            else:
+                static += np.load(params.LABEL + f"_{l}.npz")[l]
+
+        relax_grid, rlx_idx, nbox = get_grid_from_params(
+            params,
+            gridS,
+            nidx=True,
+            nbox=True,
+            numbers=gridS.numbers,
+            positions=gridS.positions,
+        )
+        shape_ = np.diff(nbox, axis=0).astype(int).reshape(-1)
+        nzmin = nbox[0, 2]
+        nzmax = nbox[1, 2]
+        # if options.zrange:
+        #     if options.zrange[0] >= p.BBOX[0, 2] - zref:
+        #         nzmin = int(np.rint((options.zrange[0] + zref) / dz))
+        #     if options.zrange[1] <= p.BBOX[1, 2] - zref:
+        #         nzmax = int(np.rint((options.zrange[1] + zref) / dz))
+        # Make points grid
+        xi, yi = np.mgrid[0 : shape_[0], 0 : shape_[1]]
+        zi = np.arange(nzmin - nbox[0, 2], nzmax - nbox[0, 2])
+        xi, yi = xi.flatten(), yi.flatten()
+        bbox_shape = [shape_[0], shape_[1], zi.size]
+        if size > 1:
+            print("\n> Preparing parallelization.")
+            # Prepare parallelization
+            idx = np.arange(xi.size)
+            div = np.mod(idx, size)
+            par_idx = [idx[div == i] for i in range(size)]
+            data = dict(par_idx=par_idx, xi=xi, yi=yi)
+        else:
+            par_x, par_y = xi, yi
+        dr = denscalc.gridS.dr
+        dR = relax_grid.dR
+        ortho = denscalc.gridS.ortho
+        rpivot = params.RPIVOT
+        kappa = params.K
+        method = params.MINMETHOD
+
+    else:
+        static, zi, dr, dR, rpivot, kappa, method, ortho = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        count = np.zeros(size, dtype=int)
+        displ = None
+        data = None
+
+    if size > 1:
+        data = comm.bcast(data, root=0)
+        par_x = data["xi"][data["par_idx"][rank]]
+        par_y = data["yi"][data["par_idx"][rank]]
+
+    # Scatter gridpoints for each core
+    # comm.Bcast(count, root=0)
+    zi = comm.bcast(zi, root=0)
+
+    # Broadcast necessary data
+    dr = comm.bcast(dr, root=0)
+    dR = comm.bcast(dR, root=0)
+    ortho = comm.bcast(ortho, root=0)
+    kappa = comm.bcast(kappa, root=0)
+    method = comm.bcast(method, root=0)
+    rpivot = comm.bcast(rpivot, root=0)
+    static = comm.bcast(static, root=0)
+
+    npivot = rpivot / dr[2]
+
+    # Initialize necessary objects and functions in each core
+    ## Interpolating function
+    inter_E = tricubic(list(static), list(static.shape))
+
+    it = np.nditer(
+        [par_x, par_y, None],
+        op_dtypes=[int, int, (np.float64, (zi.size, 3))],
+    )
+    if ortho:
+        if rank == 0:
+            print("> Energy minimization.")
+        for i, j, res in it:
+            res[...] = relax_tip_z(i, j, inter_E, kappa, npivot, zi, dr, method)
+        res = it.operands[2]
+        if rank == 0:
+            print("< done.\n")
+    else:
+        print("not implemented... Exiting.")
+        Exception("Not implemented.")
+
+    if size > 1:
+        rec_data = comm.gather(res, root=0)
+        if rank == 0:
+            print("> Gathering data...")
+            rec_res = np.empty([xi.size, zi.size, 3])
+            for i in range(size):
+                rec_res[par_idx[i]] = rec_data[i]
+            print("< done.\n")
+    else:
+        rec_res = res
+
+    if rank == 0:
+        E = rec_res[:, :, 0].reshape(bbox_shape)
+        print(
+            "F_max = {:.4f} pN".format(
+                1602 * np.gradient(E, -relax_grid.dr[2], axis=2).max()
+            )
+        )
+        T = tip = np.moveaxis(rec_res[:, :, -2:], -1, 0).reshape([2, *bbox_shape])
+        print("< done.\n")
+        cartpos = np.array(sph2cart(*T, rpivot))
+
+        label = params.LABEL
+        print(
+            f"> Saving relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz array..."
+        )
+        relax_grid.set_density("E", E)
+        relax_grid.save_density(
+            "E", f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
+        )
+        steptime['relax'] = dt.now() - trelax
+
+    comm.Barrier()
+
+if steps.stm:
+    if rank == 0:
+        print("Calculating STM data.")
+        print("not implemented... Exiting.")
+
+if steps.brstm:
+    if rank == 0:
+        print("Calculating BRSTM image.")
+        print("not implemented... Exiting.")
+
+if rank == 0:
+    t_ = dt.now()
+    t_elapsed = t_ - t
+    t_str = t_.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Finished on {t_str}")
+    t_str = str(t_elapsed)
+    print(f"Time elapsed: {t_str}")
+    print(f"{'Steps':7s} | time (h:m:s)")
+    print("-" * 24)
+    for k, v in steps.__dict__.items():
+        if not v:
+            continue
+        print(f"{k:7s} | " + str(steptime[k]))
+    print("Done.")

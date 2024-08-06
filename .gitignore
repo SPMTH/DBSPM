@@ -1,0 +1,9 @@
+!/.gitignore
+.DS_Store
+example/.DS_Store
+.*/
+pyrightconfig.json
+*.pyc
+*.pyo
+*.pyd
+*.egg-info

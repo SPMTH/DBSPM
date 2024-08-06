@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# %%
+# Import pydbspm modules.
+from ..pydbspm.input_parser import parse_params, parse_sites
+from ..pydbspm.calculators.vasp import vasp_params
+from ..pydbspm.tools import usetmpdir
+
+# Import external modules.
+import numpy as np
+import pandas as pd
+from ase.atoms import Atoms
+from ase.io import read
+from ase.calculators.vasp import Vasp
+from argparse import ArgumentParser
+from pathlib import Path
+from shutil import copy
+
+# %%
+# Get input file location from command arguments
+parser = ArgumentParser()
+parser.add_argument(
+    "-i", "--input", action="store", type=str, default=None, help="Input file."
+)
+parser.add_argument(
+    "-c",
+    "--cutoff",
+    action="store",
+    type=float,
+    default=None,
+    help="Kinetic energy cutoff (eV).",
+)
+parser.add_argument(
+    "-z",
+    "--zrange",
+    action="store",
+    type=float,
+    default=None,
+    nargs=2,
+    help="Tip-sample distance range (Å).",
+)
+parser.add_argument(
+    "--select-sites",
+    action="store",
+    type=str,
+    default=None,
+    nargs="+",
+    help="Select sites from input.",
+)
+parser.add_argument(
+    "--debug-vasp", action="store_true", help="Save VASP calc to debug problems."
+)
+parser.add_argument(
+    "--no-restart", action="store_true", help="Do VASP calc from scratch every time."
+)
+options = parser.parse_args()
+# %%
+print("pydbspm\nSPM-TH @ UAM")
+print("Calculating DFT Fz for selected sites")
+# Parse the parameters and sites dictionaries.
+params = parse_params(options.input)
+sites = parse_sites(options.input)
+# if type(params) != dict:
+#    params = dict(vars(params))
+if type(sites) != dict:
+    sites = dict(vars(sites))
+if not sites.keys():
+    raise ValueError(
+        "There were no sites on the input file. Sites must be provided for the DFT Fz calculation."
+    )
+if options.select_sites:
+    sites = dict(zip(options.select_sites, [sites[k] for k in options.select_sites]))
+print(f"\nFz DFT calculation for: {params.LABEL}")
+print("\nSites:")
+for k in sites.keys():
+    print(f"{k}\t{sites[k][0]:.4f}\t{sites[k][1]:.4f}")
+
+fname = params.LABEL
+
+# Import coordinates to atoms objects and set needed variables.
+try:
+    tip = read(str(params.TIP / "CHGCAR"))
+except:
+    tip = read(str(params.TIP / "CONTCAR"))
+try:
+    sample = read(str(params.SAMPLE / "CHGCAR"))
+except:
+    sample = read(str(params.SAMPLE / "CONTCAR"))
+atoms = sample + tip
+posS = sample.positions.copy()
+posT = tip.positions.copy()
+numbers = np.array(atoms.numbers, order="F", dtype=np.float64)
+cell = np.array(atoms.cell.T, order="F", dtype=np.float64)
+print("\nSample coordinates (Ang)")
+for i, s in enumerate(sample.get_chemical_symbols()):
+    print("{}\t{:.4f}\t{:.4f}\t{:.4f}".format(s, *posS[i]))
+print("\nTip coordinates (Ang)")
+for i, s in enumerate(tip.get_chemical_symbols()):
+    print("{}\t{:.4f}\t{:.4f}\t{:.4f}".format(s, *posT[i]))
+print("\nCell lattice vectors (Ang)")
+print("---------------------------------")
+print("a\t{:.4f}\t{:.4f}\t{:.4f}".format(*sample.cell[0]))
+print("b\t{:.4f}\t{:.4f}\t{:.4f}".format(*sample.cell[1]))
+print("c\t{:.4f}\t{:.4f}\t{:.4f}".format(*sample.cell[2]))
+
+# Get dx, dy, dz
+grid_data = np.load(params.GRID)
+shape = grid_data["shape"]
+dr = grid_data["dr"]
+dx, dy, dz = dr
+print("\nGrid\tx\ty\tz")
+print("---------------------------------")
+print("n\t{}\t{}\t{}\tpts".format(*shape))
+print("diff\t{:.4f}\t{:.4f}\t{:.4f}\tAng".format(*dr))
+
+# %%
+# Get reference z value up to 10e-4 and z-init and z-fin in grid points.
+if params.ZREF != None:
+    zref = params.ZREF
+else:
+    zref = np.round(np.average(sample.positions[:, 2]), 4)
+if options.zrange:
+    z0, zf = options.zrange
+else:
+    z0 = params.Z0
+    zf = params.ZF
+
+nz0 = int(np.rint((z0 + zref) / dz))
+nzf = int(np.rint((zf + zref) / dz))
+print("\nz-reference\tz0 (grid)\tzf (grid)")
+print("-----------------------------------------")
+print("{:.4f}\t\t{:.4f}\t\t{:.4f}\tAng".format(zref, nz0 * dz - zref, nzf * dz - zref))
+# %%
+# Set vasp calculation.
+vasp_p = vasp_params(options.input)
+if "luse_vdw" in vasp_p.keys() and vasp_p["luse_vdw"]:
+    vasp_p["ivdw"] = 0
+
+vasp_def = dict(
+    pp=params.PSEUDOS,
+    sigma=0.1,
+    prec="Accurate",
+    algo="fast",
+    ismear=0,
+    ivdw=11,
+    idipol=3,
+    lreal="Auto",
+    lhfcalc=False,
+    gga="PE",
+    hfscreen=0,
+)
+if options.cutoff:
+    vasp_def["encut"] = options.cutoff
+vasp_i = dict(
+    istart=0,
+    icharg=2,
+    ibrion=-1,
+    nsw=0,
+    lcharg=True,
+    lwave=True,
+    lhfcalc=False,
+    gga="PE",
+    hfscreen=0,
+)
+vasp_c = dict(icharg=1, istart=1, ibrion=-1, nsw=0, lcharg=True, lwave=True)
+
+vasp_i_ = vasp_def.copy()
+vasp_i_.update(vasp_p)
+vasp_i_.update(vasp_i)
+vasp_c_ = vasp_def.copy()
+vasp_c_.update(vasp_p)
+vasp_c_.update(vasp_c)
+
+for l in ["ivdw", "lcharg", "lwave", "ibrion", "nsw"]:
+    if l in vasp_p.keys() and vasp_p[l] != vasp_i_[l]:
+        print(
+            f"! Warning: {l} in {options.input} ({vasp_p[l]}) is different from the recommended value ({vasp_i[l]}). Hope you know what you are doing!!!"
+        )
+
+for l in ["ivdw", "lcharg", "lwave", "ibrion", "nsw"]:
+    if l in vasp_p.keys() and vasp_p[l] != vasp_i_[l]:
+        print(
+            f"! Warning: {l} in {options.input} ({vasp_p[l]}) is different from the recommended value ({vasp_i[l]}). Hope you know what you are doing!!!"
+        )
+vasp_init = Vasp(command=params.VASPCMD, **vasp_i_)
+
+vasp_cont = Vasp(command=params.VASPCMD, **vasp_c_)
+
+# if options.cutoff:
+#    vasp_init.set(encut = options.cutoff)
+#    vasp_cont.set(encut = options.cutoff)
+
+# Set results array
+res = np.zeros((len(sites.keys()), np.abs(nz0 - nzf) + 1))
+
+
+# Iterating VASP function
+def do_fz_vasp():
+    for b, site in enumerate(sites.keys()):
+        # Get site position in grid coordinates
+        nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+        print("Calculating site... {}".format(site))
+        n = 0
+        nzrange = np.arange(nzf + 1, nz0, -1, dtype=int)
+        precalc = [False] * nzrange.size
+        if vasp_c_["lhfcalc"]:
+            if options.no_restart:
+                precalc = [True] * nzrange.size
+            else:
+                precalc[0] = True
+        for c, nz in enumerate(nzrange):
+            idx = np.array([nx, ny, nz])  # Convert to array for mult
+            displace = idx * dr  # Get disp vector for tip pos
+            posD = posT + displace  # Displace tip positions
+            pos = np.append(posS, posD, axis=0)  # Join sample and tip pos
+            if precalc[c]:
+                vasp_init.set(directory=wd)
+                atoms = Atoms(
+                    positions=pos,
+                    numbers=numbers,
+                    cell=cell,
+                    pbc=True,
+                    calculator=vasp_init,
+                )
+                res[b, c] = atoms.get_potential_energy()
+                vasp_cont.set(directory=wd)
+                atoms = Atoms(
+                    positions=pos,
+                    numbers=numbers,
+                    cell=cell,
+                    pbc=True,
+                    calculator=vasp_cont,
+                )
+                res[b, c] = atoms.get_potential_energy()
+
+            elif not precalc[c]:
+                if n == 0 or options.no_restart:
+                    vasp_init.set(directory=wd)
+                    atoms = Atoms(
+                        positions=pos,
+                        numbers=numbers,
+                        cell=cell,
+                        pbc=True,
+                        calculator=vasp_init,
+                    )
+                else:
+                    vasp_cont.set(directory=wd)
+                    atoms = Atoms(
+                        positions=pos,
+                        numbers=numbers,
+                        cell=cell,
+                        pbc=True,
+                        calculator=vasp_cont,
+                    )
+                res[b, c] = atoms.get_potential_energy()
+            print("{:.4f}\t{:.6f} eV".format(nz * dr[2] - zref, res[b, c]))
+            n += 1
+
+
+print("\n---Starting Fz DFT calculation---")
+if not options.debug_vasp:
+    with usetmpdir():
+        do_fz_vasp()
+# else:
+#     oldpwd = os.getcwd()
+#     os.mkdir('Fz_DFT')
+#     os.chdir('Fz_DFT')
+#     do_fz_vasp()
+#     os.chdir(oldpwd)
+else:
+    res = np.zeros((len(sites.keys()), np.abs(nz0 - nzf) + 1))
+    for b, site in enumerate(sites.keys()):
+        # Get site position in grid coordinates
+        nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+        wd = Path(f"{site}/{nzf*dz-zref:.2f}/.")
+        print("Calculating site... {}".format(site))
+        n = 0
+        nzrange = np.arange(nzf, nz0 - 1, -1, dtype=int)
+        precalc = [False] * nzrange.size
+        if vasp_c_["lhfcalc"]:
+            if options.no_restart:
+                precalc = [True] * nzrange.size
+            else:
+                precalc[0] = True
+        for c, nz in enumerate(nzrange):
+            idx = np.array([nx, ny, nz])  # Convert to array for mult
+            displace = idx * dr  # Get disp vector for tip pos
+            posD = posT + displace  # Displace tip positions
+            pos = np.append(posS, posD, axis=0)  # Join sample and tip pos
+            wd_ = wd
+            wd = Path(f"{site}/{nz*dz-zref:.2f}/.")
+            if precalc[c]:
+                if n != 0 and not options.no_restart:
+                    wd.mkdir(parents=True, exist_ok=True)
+                    copy(str(wd_ / "WAVECAR"), str(wd / "WAVECAR"))
+                    copy(str(wd_ / "CHGCAR"), str(wd / "CHGCAR"))
+                vasp_init.set(directory=wd)
+                atoms = Atoms(
+                    positions=pos,
+                    numbers=numbers,
+                    cell=cell,
+                    pbc=True,
+                    calculator=vasp_init,
+                )
+                precalc_energy = atoms.get_potential_energy()
+                vasp_cont.set(directory=wd)
+                atoms = Atoms(
+                    positions=pos,
+                    numbers=numbers,
+                    cell=cell,
+                    pbc=True,
+                    calculator=vasp_cont,
+                )
+                res[b, c] = atoms.get_potential_energy()
+
+            elif not precalc[c]:
+                if n == 0 or options.no_restart:
+                    vasp_init.set(directory=wd)
+                    atoms = Atoms(
+                        positions=pos,
+                        numbers=numbers,
+                        cell=cell,
+                        pbc=True,
+                        calculator=vasp_init,
+                    )
+                else:
+                    wd.mkdir(parents=True, exist_ok=True)
+                    copy(str(wd_ / "WAVECAR"), str(wd / "WAVECAR"))
+                    copy(str(wd_ / "CHGCAR"), str(wd / "CHGCAR"))
+                    vasp_cont.set(directory=wd)
+                    atoms = Atoms(
+                        positions=pos,
+                        numbers=numbers,
+                        cell=cell,
+                        pbc=True,
+                        calculator=vasp_cont,
+                    )
+                res[b, c] = atoms.get_potential_energy()
+            n += 1
+            print("{:.4f}\t{:.6f} eV".format(nz * dr[2] - zref, res[b, c]))
+
+print("---Finished Fz DFT calculation---")
+
+data_E = res
+zE = np.linspace(nz0 * dz - zref, nzf * dz - zref, np.abs(nz0 - nzf) + 1, True).round(4)
+E = pd.DataFrame(data_E.T, index=zE[::-1], columns=sites.keys())
+E.index.name = "z"
+
+print("> Taking dE...")
+data_dE = (data_E[:, 1:] - data_E[:, :-1]) / dz
+print("< dE obtained.")
+zF = np.linspace(
+    nz0 * dz + dz / 2 - zref, nzf * dz + dz / 2 - zref, np.abs(nz0 - nzf), False
+).round(4)
+dE = pd.DataFrame(data_dE.T, index=zF[::-1], columns=sites.keys())
+dE.index.name = "z"
+print("Saving dataframes to csv")
+E.to_csv(fname + "_E_dft.csv")
+dE.to_csv(fname + "_dE_dft.csv")
+print("Done.")

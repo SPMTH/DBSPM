@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# Import pydbspm modules.
+from ..pydbspm.interactions import get_density_overlap, get_dftd3_api_grid
+from ..pydbspm.input_parser import parse_params, parse_sites
+
+# Import external modules.
+import numpy as np
+from pandas import DataFrame
+from pandas import read_csv
+from ase.io import read
+from argparse import ArgumentParser
+from scipy.interpolate import interp1d
+from scipy.optimize import least_squares
+
+
+def alpha_fit(
+    rhoT, nrhoT, rhoS, potS, dE_dft, params, sites, dr, zref, fname=None, verb=False
+):
+    """alpha and V0 fitting function.
+    It calculates the ideal alpha and V0 for the SR forces by minimizing
+    the function dft2model, which takes alpha and V0 and returns the
+    diference between the DFT-calculated force and the FDBM force.
+
+        Takes:
+    rhoT:   Tip charge density array (processed with grid_processing.py)
+    rhoS:   Sample charge density array (processed with grid_processing.py
+    nrhoT:  Neutral tip charge density array (processed with grid_processing.py)
+    potS:   Sample local potential array (processed with grid_processing.py)
+    dE_dft: DFT-dE Dataframe (index=tip-sample distance, columns=sites)
+    params: Input dictionary (parsed with input_parser.py)
+    sites:  Sites dictionary (parsed with input_parser.py)
+    dr:     Differences array [dx, dy, dz]
+    zref:   Reference z-distance (sample plane)
+    fname:  If given, will save the Fz components in different DataFrames.
+    verb:   Prints all the outputs.
+
+        Returns:
+    fit:    Scipy optimizer object (fit.x=fitted parameters array [V0,a])
+    """
+    tip = read(str(params.TIP / "CHGCAR"), format="vasp")
+    sample = read(str(params.SAMPLE / "CHGCAR"), format="vasp")
+    atoms = sample + tip
+    numbersS = np.array(sample.numbers, order="F", dtype=np.float64)
+    numbersT = np.array(tip.numbers, order="F", dtype=np.float64)
+    cell = np.array(atoms.cell, order="F", dtype=np.float64)
+    posS = sample.positions.copy()
+    posT = tip.positions.copy()
+    dr = np.array(dr, dtype=float)
+    dz = dr[2]
+    nz0 = int(np.rint((params.Z0 + zref) / dz))
+    nzf = int(np.rint((params.ZF + zref) / dz))
+
+    # Electrostatic fFT convolution.
+    ## Convolve potS and nrhoT in the reciprocal space.
+    if verb:
+        print("\n> Performing electrostatic interaction convolution.")
+    fft = get_density_overlap(potS, nrhoT, dr)
+    ## Extract Ez for the fitting sites
+    es_fft = np.zeros((len(sites), np.abs(nz0 - nzf) + 1))
+    for b, site in enumerate(sites.keys()):
+        nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+        es_fft[b, :] = fft[nx, ny, nz0 : nzf + 1]
+    del fft
+
+    if verb:
+        print("> Performing DFT-D3 calculation.")
+    vdw_d3 = np.zeros((len(sites), np.abs(nz0 - nzf) + 1))
+    for b, site in enumerate(sites.keys()):
+        nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+        for c, nz in enumerate(range(nz0, nzf + 1)):
+            idx = dr * (nx, ny, nz)
+            vdw_d3[b, c] = get_dftd3_api_grid(
+                cell, posS, posT, numbersS, numbersT, *idx
+            )[0]
+        if verb:
+            print("< Site: {} calculated.".format(site))
+
+    # Take dE
+    if verb:
+        print("> Getting ES/DFT-D3 dE.")
+    data_dE_es = (es_fft[:, :-1] - es_fft[:, 1:]) / dz
+    data_dE_vdw = (vdw_d3[:, :-1] - vdw_d3[:, 1:]) / dz
+
+    # Create dE's dataframes
+    zF = np.linspace(
+        nz0 * dz + dz / 2 - zref,
+        nzf * dz + dz / 2 - zref,
+        num=np.abs(nz0 - nzf),
+        endpoint=False,
+    )
+    zF = np.round(zF, 4)
+    dE_es = DataFrame(data_dE_es.T, index=zF, columns=sites.keys())
+    dE_vdw = DataFrame(data_dE_vdw.T, index=zF, columns=sites.keys())
+    dE_es.index.name = "z"
+    dE_vdw.index.name = "z"
+    dE_dft.index = np.round(dE_dft.index, 4)
+    if fname:
+        dE_es.to_csv(fname + "_dE_es.csv")
+        dE_vdw.to_csv(fname + "_dE_vdw.csv")
+    if verb:
+        print("< ES/DFT-D3 dE obtained.")
+
+    zmin = zF[0]
+    zmax = zF[-1]
+    zF_dft = dE_dft.index
+    z_dft_idx = (zF_dft <= zmax) * (zF_dft >= zmin)
+    z_dft = zF_dft[z_dft_idx]
+    rhoTi = rhoT[::-1, ::-1, ::-1]
+
+    if params.FITV0:
+        alpha = params.ALPHA
+        fft = np.real(
+            np.fft.ifftn(
+                (np.fft.fftn(rhoS**alpha) * np.fft.fftn(rhoTi**alpha)) * np.prod(dr)
+            )
+        )
+
+        def dft2model(params):
+            V0 = params[0]
+            dF_out = np.array([])
+            for site in sites.keys():
+                nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+                fft_site = fft[nx - 1, ny - 1, nz0 - 1 : nzf]
+                dE_fft_site = (fft_site[:-1] - fft_site[1:]) / dr[2]
+                F_DFT = dE_dft[site].loc[z_dft]
+                Z = dE_es[site] + V0 * dE_fft_site + dE_vdw[site]
+                d_inter = interp1d(zF, Z, kind="cubic")
+                F_MODEL = d_inter(z_dft)
+                dF_out = np.append(dF_out, F_DFT - F_MODEL)
+            return dF_out
+
+    else:
+
+        def dft2model(params):
+            V0 = params[0]
+            alpha = params[1]
+            dF_out = np.array([])
+            fft = np.real(
+                np.fft.ifftn(
+                    (np.fft.fftn(rhoS**alpha) * np.fft.fftn(rhoTi**alpha)) * np.prod(dr)
+                )
+            )
+            for site in sites.keys():
+                nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+                fft_site = fft[nx - 1, ny - 1, nz0 - 1 : nzf]
+                dE_fft_site = (fft_site[:-1] - fft_site[1:]) / dr[2]
+                F_DFT = dE_dft[site].loc[z_dft]
+                Z = dE_es[site] + V0 * dE_fft_site + dE_vdw[site]
+                d_inter = interp1d(zF, Z, kind="cubic")
+                F_MODEL = d_inter(z_dft)
+                dF_out = np.append(dF_out, F_DFT - F_MODEL)
+            return dF_out
+
+    if params.FITV0:
+        if verb:
+            print("> Fitting V0.")
+        fit = least_squares(dft2model, x0=[50])
+        alpha = params.ALPHA
+    else:
+        if verb:
+            print("> Fitting alpha and V0.")
+        fit = least_squares(dft2model, x0=[50, 1.07])
+        alpha = fit.x[1]
+    if verb:
+        print("< Fitting done.")
+
+    if fname:
+        sr_fft = np.real(
+            np.fft.ifftn(
+                (np.fft.fftn(rhoS**alpha) * np.fft.fftn(rhoTi**alpha)) * np.prod(dr)
+            )
+        )
+        dE_sr = DataFrame(0, index=zF, columns=sites.keys())
+        dE_sr.index.name = "z"
+        for site in sites.keys():
+            nx, ny = np.array(np.rint(sites[site] / dr[:2]), dtype=int)
+            fft_site = sr_fft[nx - 1, ny - 1, nz0 - 1 : nzf]
+            dE_sr.loc[:, site] = (fft_site[:-1] - fft_site[1:]) / dr[2]
+        V = fit.x[0]
+        dE_sr.to_csv(fname + "_dE_sr_a{:.4f}_V{:.4f}.csv".format(alpha, V))
+
+    return fit
+
+
+if __name__ == "__main__":
+    # Get input file location from command arguments
+    parser = ArgumentParser()
+    parser.add_argument(
+        "-i",
+        "--input",
+        action="store",
+        type=str,
+        default=None,
+        required=True,
+        help="Input file.",
+    )
+    parser.add_argument(
+        "-z",
+        "--zrange",
+        action="store",
+        type=float,
+        default=None,
+        nargs=2,
+        help="Tip-sample distance range (Å).",
+    )
+    parser.add_argument(
+        "-a",
+        "--alpha",
+        action="store",
+        type=float,
+        default=None,
+        help="Alpha parameter. If passed, only V will be fitted according to this alpha.",
+    )
+    parser.add_argument("-s", "--save", action="store_true", help="Save dE/dz arrays.")
+    options = parser.parse_args()
+
+    print("pydbspm\nSPM-TH @ UAM")
+    print("Fitting the density overlap integral parameters")
+
+    # Parse the parameters and sites dictionary.
+    params = parse_params(options.input)
+    sites = parse_sites(options.input)
+    sites = dict(vars(sites)) if type(sites) != dict else sites
+    if options.alpha:
+        params.FITV0 = True
+        params.ALPHA = options.alpha
+    else:
+        params.FITV0 = False
+
+    print("\nPerforming Fz with DFT on the following sites:")
+    for k in sites.keys():
+        print("{}\t{:.4f}\t{:.4f}".format(k, *sites[k]))
+
+    fname = params.LABEL
+
+    # Import coordinates to atoms objects and set needed variables.
+    try:
+        tip = read(str(params.TIP / "CHGCAR"))
+    except:
+        tip = read(str(params.TIP / "CONTCAR"))
+    try:
+        sample = read(str(params.SAMPLE / "CHGCAR"))
+    except:
+        sample = read(str(params.SAMPLE / "CONTCAR"))
+    atoms = sample + tip
+    posS = sample.positions.copy()
+    posT = tip.positions.copy()
+    numbers = np.array(atoms.numbers, order="F", dtype=np.float64)
+    cell = np.array(atoms.cell, order="F", dtype=np.float64)
+    print("\nSample coordinates (Ang)")
+    for i, s in enumerate(sample.get_chemical_symbols()):
+        print("{}\t{:.4f}\t{:.4f}\t{:.4f}".format(s, *posS[i]))
+    print("\nTip coordinates (Ang)")
+    for i, s in enumerate(tip.get_chemical_symbols()):
+        print("{}\t{:.4f}\t{:.4f}\t{:.4f}".format(s, *posT[i]))
+    print("\nCell lattice vectors (Ang)")
+    print(str(cell))
+
+    # Get dx, dy, dz
+    # grid        = get_shape(params.TIP/'CHGCAR',  len(tip))
+    # dr          = tip.get_cell_lengths_and_angles()[:-3]/grid
+    # dx, dy, dz  = dr
+    grid_data = np.load(params.GRID)
+    shape = grid_data["shape"]
+    dr = grid_data["dr"]
+    dx, dy, dz = dr
+    print("\ndx\tdy\tdz")
+    print("----------------------------")
+    print("{:.4f}\t{:.4f}\t{:.4f}".format(*dr))
+
+    # Get reference z value up to 10e-4 and z-init and z-fin in grid points.
+    if params.ZREF != None:
+        zref = params.ZREF
+    else:
+        zref = np.round(np.average(sample.positions[:, 2]), 4)
+    if options.zrange:
+        z0, zf = options.zrange
+    else:
+        z0 = params.Z0
+        zf = params.ZF
+    nz0 = int(np.rint((z0 + zref) / dz))
+    nzf = int(np.rint((zf + zref) / dz))
+    params.Z0 = nz0 * dz - zref
+    params.ZF = nzf * dz - zref
+    print("\nz (ref.)\tz0 (grid)\tzf (grid)")
+    print("-----------------------------------------")
+    print("{:.4f}\t\t{:.4f}\t\t{:.4f}".format(zref, nz0 * dz - zref, nzf * dz - zref))
+
+    # Load sample/tip density arrays and set their variables.
+    sample_data = np.load(params.SAMPLE / "sample.npz")
+    tip_data = np.load(params.TIP / "tip.npz")
+    rhoS = sample_data["rhoS"]
+    potS = sample_data["potS"]
+    rhoT = tip_data["rhoT"]
+    nrhoT = tip_data["nrhoT"]
+    print("\nrho ->\tMax\tMin\tnElec")
+    print("------------------------------")
+    print(
+        "Sample\t{:.4f}\t{:.4f}\t{:.2f}".format(
+            rhoS.max(), rhoS.min(), rhoS.sum() * np.prod(dr)
+        )
+    )
+    print(
+        "Tip\t{:.4f}\t{:.4f}\t{:.2f}".format(
+            rhoT.max(), rhoT.min(), rhoT.sum() * np.prod(dr)
+        )
+    )
+    print(
+        "nTip\t{:.4f}\t{:.2f}\t{:.2f}".format(
+            nrhoT.max(), nrhoT.min(), nrhoT.sum() * np.prod(dr)
+        )
+    )
+    print("\npot ->\tMax\tMin")
+    print("------------------------------")
+    print("Sample\t{:.4f}\t{:.4f}".format(potS.max(), potS.min()))
+
+    # Load DFT Fz data
+    print("> Loading DFT data.")
+    dE_dft = read_csv(params.TIP / ".." / (fname + "_dE_dft.csv"), index_col=0)
+
+    # Perform fit
+    print("> Fitting.")
+    fit = alpha_fit(
+        rhoT,
+        nrhoT,
+        rhoS,
+        potS,
+        dE_dft,
+        params,
+        sites,
+        dr,
+        zref,
+        fname=fname if options.save else None,
+        verb=False,
+    )
+    if options.alpha:
+        print("\nFitted V0")
+    else:
+        print("\nFitted parameters")
+    print("&alpha;\tV0\tcost")
+    print("-------------------------------------")
+    if options.alpha:
+        print(f"{params.ALPHA:.4f}\t{fit.x[0]:.4f}\t{fit.cost}")
+    else:
+        print(f"{fit.x[1]:.4f}\t{fit.x[0]:.4f}\t{fit.cost}")
+    print("\nAll done.")
