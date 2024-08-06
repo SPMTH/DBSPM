@@ -3,3 +3,4 @@ example/relax_pyridine_k0.2000.npz filter=lfs diff=lfs merge=lfs -text
 example/pyridine_es.npz filter=lfs diff=lfs merge=lfs -text
 example/pyridine_sr_a1.08.npz filter=lfs diff=lfs merge=lfs -text
 example/sample/sample.npz filter=lfs diff=lfs merge=lfs -text
+example/DBSPM_Basic_Quick-start.ipynb filter=lfs diff=lfs merge=lfs -text
