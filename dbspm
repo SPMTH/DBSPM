@@ -270,9 +270,9 @@ if steps.sr:
     if rank == 0:
         print("> Calculating SR interaction.")
         tsr = dt.now()
-        if denscalc.rhoS is not None:
+        if denscalc.rhoS is None:
             denscalc.load_sample()
-        if denscalc.rhoT is not None:
+        if denscalc.rhoT is None:
             denscalc.load_tip()
 
         denscalc.set_calculation_grid()
@@ -288,11 +288,11 @@ if steps.sr:
 if steps.es:
     if rank == 0:
         print("> Calculating ES interaction.")
-        if denscalc.potS is not None:
+        if denscalc.potS is None:
             denscalc.load_sample()
-        if denscalc.nrhoT is not None:
+        if denscalc.nrhoT is None:
             denscalc.load_tip()
-        if denscalc.grid is not None:
+        if denscalc.grid is None:
             denscalc.set_calculation_grid()
         tes = dt.now()
         es = get_density_overlap(denscalc.potS, denscalc.nrhoT, denscalc.gridS.dr)
@@ -308,11 +308,11 @@ if steps.vdw:
     if rank == 0:
         print("Calculating vdW interaction.")
         tvdw = dt.now()
-        if denscalc.sample is not None:
+        if denscalc.sample is None:
             denscalc.load_sample()
-        if denscalc.gridT is not None:
+        if denscalc.gridT is None:
             denscalc.load_tip()
-        if denscalc.grid is not None:
+        if denscalc.grid is None:
             denscalc.set_calculation_grid()
 
         cell = gridS.cell
@@ -396,9 +396,9 @@ if steps.relax:
     if rank == 0:
         print("Relaxing probe on static potential.")
         trelax = dt.now()
-        if denscalc.gridS is not None:
+        if denscalc.gridS is None:
             denscalc.load_sample()
-        if denscalc.grid is not None:
+        if denscalc.grid is None:
             denscalc.set_calculation_grid()
 
         static = np.zeros(denscalc.grid.shape)
