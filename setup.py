@@ -5,7 +5,7 @@ setup(
     version="0.1a",
     packages=["pydbspm"],
     install_requires=[
-        "numpy",
+        "numpy<2",
         "scipy",
         "mpi4py",
         "dftd3",
