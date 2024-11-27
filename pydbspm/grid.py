@@ -133,6 +133,8 @@ class Grid:
 def save_grid(filename, grid: Grid, **kwargs: threeD):
     if kwargs:
         for v in kwargs.values():
+            print(f"v.shape: {v.shape}")
+            print(f"grid.shape: {grid.shape}")
             assert np.equal(v.shape, grid.shape).all(), "Shape mismatch."
     else:
         kwargs = {}

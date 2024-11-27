@@ -277,9 +277,16 @@ if steps.sr:
 
         denscalc.set_calculation_grid()
         sr = get_density_overlap(denscalc.rhoS**params.ALPHA, denscalc.rhoT**params.ALPHA, denscalc.gridS.dr)
+        print(f"sr shape before sr[denscalc.nidx]: {sr.shape}")
+        print(f" denscalc.nidx {denscalc.nidx}")
         sr = sr[denscalc.nidx]
+
+        print(f"SR shape {sr.shape}")
+        print(f"denscalc.grid shape {denscalc.grid.shape}")
         denscalc.grid.set_density("sr", sr)
         print(f"- Saving {params.LABEL}_sr_a{params.ALPHA:.2f}.npz")
+        print(f"sr shape: {sr.shape}")
+        print(f"denscalc.grid.shape: {denscalc.grid.shape}")
         denscalc.grid.save_density("sr", params.LABEL + f"_sr_a{params.ALPHA:.2f}.npz")
         steptime['sr'] = dt.now() - tsr
         print("< done.\n")
