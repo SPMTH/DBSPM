@@ -12,6 +12,7 @@ from pydbspm.grid import Grid, neutralize_charge, filter_neg, threeAxis, threeN
 
 def get_vasp_params(INPUT=None) -> dict:
     vasp_dict = dict(
+        encut=400,
         istart=0,
         icharg=2,
         sigma=0.1,
