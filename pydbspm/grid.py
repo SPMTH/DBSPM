@@ -148,6 +148,7 @@ def save_grid(filename, grid: Grid, **kwargs: threeD):
         cell=grid.cell,
         numbers=grid.numbers,
         positions=grid.positions,
+        zref = grid.zref,
     )
 
 
