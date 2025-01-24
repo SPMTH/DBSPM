@@ -116,6 +116,25 @@ class Grid:
         self.z = (self.z + zref_) - zref
         self.zref = zref
 
+    def interpolate_density(self, grid, label):
+        import tricubic
+        data = grid.__getattribute__(label)
+        interp = tricubic.tricubic(list(data), list(data.shape))
+        x_min = grid.x.min()
+        y_min = grid.y.min()
+        z_min = grid.z.min()
+        X = np.repeat(self.x[...,np.newaxis], len(self.z), axis=2)  - x_min
+        Y = np.repeat(self.y[...,np.newaxis], len(self.z), axis=2)  - y_min
+        Z = np.ones(self.shape) * self.z - z_min
+        nX  = X/grid.dr[0]
+        nY  = Y/grid.dr[1]
+        nZ  = Z/grid.dr[2]
+        res = np.zeros(self.shape)
+        it  = np.nditer([nX,nY,nZ], flags=['multi_index'])
+        for x,y,z in it:
+            res[it.multi_index] = interp.ip(list([x,y,z]))
+        self.set_density(label,res)
+
     # def replicate(self, *n, axis=(0, 1)):
     #     assert len(n) == 3, "Replication requires an argument for each axis."
     #     return Grid(self.shape * n, self.cell * n)
@@ -187,6 +206,7 @@ def get_grid_from_params(
     zpad=0.0,
     numbers=None,
     positions=None,
+    reduce=False
 ):
 #-> Grid | Tuple[Grid, Any] | Tuple[Grid, Any, Any]:
     zref = params.ZREF
@@ -205,20 +225,40 @@ def get_grid_from_params(
     span[0, 0] = bbox[1, 0] - bbox[0, 0]
     span[1, 1] = bbox[1, 1] - bbox[0, 1]
     span[2, 2] = bbox[1, 2] - bbox[0, 2]
+
     nspan = np.ceil(span / grid.dr).astype(int)
     nbox_ = np.ceil(bbox / grid.dr).astype(int)
     nbox_[1, 2] = nbox_[0, 2] + nspan[2, 2]
-    shape = nspan.diagonal()
+
+    if reduce:
+        shape = (nspan.diagonal() // params.stride).astype(int) 
+        shape[2] += 2
+        origin = np.rint(bbox[0] / grid.dr) * grid.dr
+        origin[2] -= 2*grid.dr[2]
+        adjusted_nspan = nspan.copy()
+        adjusted_nspan[2, 2] += 4
+    else:
+        shape = nspan.diagonal()
+        origin = np.rint(bbox[0] / grid.dr) * grid.dr
+        adjusted_nspan = nspan
+
     g = Grid(
         shape,
         cell=grid.cell,
-        span=nspan * grid.dr,
-        origin=np.rint(bbox[0] / grid.dr) * grid.dr,
+        span=adjusted_nspan * grid.dr,
+        origin=origin,
         zref=zref,
         numbers=numbers if numbers is not None else None,
         positions=positions if positions is not None else None,
     )
-    nidx_ = tuple([slice(i, j) for i, j in zip(nbox_[0], nbox_[1])])
+
+    if reduce:
+        nbox_[0,2] -= params.stride
+        nbox_[1,2] += params.stride
+        nidx_ = tuple([slice(i, j, params.stride) for i, j in zip(nbox_[0], nbox_[1])])
+    else:
+        nidx_ = tuple([slice(i, j) for i, j in zip(nbox_[0], nbox_[1])])
+
     if nidx:
         if nbox:
             return g, nidx_, nbox_

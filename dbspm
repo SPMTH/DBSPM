@@ -139,6 +139,25 @@ if rank == 0:
         help="Minimization method for probe relaxation (choose from scipy.minimize).",
     )
 
+    parser.add_argument(
+        "--full_vdw",
+        action="store_true",
+        default=False,
+        help="Calculate the vdw with DFTD3 in all points of the grid (default is in a reduced grid with half the points in all directions and the interpolating)."
+    )
+
+    parser.add_argument("--stride",
+        action="store",
+        type=int,
+        default=2,
+        help="Fraction of the grid in all directions in which the vdw is calculated using DFTD3(default: 2, meaning it will calculate in half the x grid, half the y grid and half the z)."
+    )
+
+    parser.add_argument("--save_stride_vdw",
+        action="store_true",
+        default=False,
+        help="Save also a vdw datafile of the reduced grid where it has been calculated using DFTD3 (default only saves data in the full grid).")
+
     options = parser.parse_args()
 
     print("Density-based SPM")
@@ -326,11 +345,25 @@ if steps.vdw:
 
         ijk = np.indices(gridS.shape, dtype=float).T
         x, y, z = np.dot(ijk / gridS.shape, gridS.cell).T
-        shape = x[denscalc.nidx].shape
+        if not options.full_vdw:
+            vdwgrid,nidx,nbox = get_grid_from_params(
+                params,
+                gridS,
+                nidx=True,
+                nbox=True,
+                rpivot=denscalc.params.RPIVOT,
+                zpad=denscalc.params.ZPAD,
+                numbers=gridS.numbers,
+                positions=gridS.positions,
+                reduce=True
+            )
+        else:
+            nidx = denscalc.nidx
+        shape = x[nidx].shape
         gx, gy, gz = (
-            x[denscalc.nidx].flatten(),
-            y[denscalc.nidx].flatten(),
-            z[denscalc.nidx].flatten(),
+            x[nidx].flatten(),
+            y[nidx].flatten(),
+            z[nidx].flatten(),
         )
         res_size = gx.size
         # Prepare parallelization
@@ -385,9 +418,15 @@ if steps.vdw:
     comm.Gatherv(res_array, [gatherE, count, displ, MPI.DOUBLE], root=0)
     if rank == 0:
         print("< data gathered.\n")
-        gatherE = gatherE.reshape(denscalc.grid.shape)
-        print("> Saving DFT-D3 npz array.")
-        denscalc.grid.set_density("vdw", gatherE)
+        gatherE = gatherE.reshape(shape)
+        print("> Saving DFT-D3 npz array.")       
+        if not options.full_vdw:
+            vdwgrid.set_density("vdw", gatherE)
+            if options.save_stride_vdw:
+                vdwgrid.save_density("vdw", params.LABEL + "_stride_vdw.npz")
+            denscalc.grid.interpolate_density(vdwgrid,"vdw")
+        else:
+            denscalc.grid.set_density("vdw",gatherE)
         denscalc.grid.save_density("vdw", params.LABEL + "_vdw.npz")
         steptime['vdw'] = dt.now() - tvdw
         print("< array saved.\n")
@@ -403,6 +442,8 @@ if steps.relax:
             denscalc.load_sample()
         if denscalc.grid is None:
             denscalc.set_calculation_grid()
+
+        gridS = denscalc.gridS
 
         static = np.zeros(denscalc.grid.shape)
         for l in params.COMPONENTS:
