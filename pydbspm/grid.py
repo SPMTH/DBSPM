@@ -74,7 +74,8 @@ class Grid:
                 print("Setting origin and span from cell.")
             self.origin = np.array([0.0, 0.0, 0.0])
             self.span = self.cell
-            self.zref = 0.0
+            if zref is None:
+                self.zref = 0.0
 
         self.x, self.y, self.z, self.dr, self.dR, self.ortho, self.lvec = get_grid(
             self.span, self.shape, mesh=True, origin=self.origin
@@ -100,7 +101,7 @@ class Grid:
                     f"Density labeled {label} already exists. Choose a different label or set `safe=False`"
                 )
                 pass
-        assert data.ndim == 3, "Data array is not 3D."
+        assert data.ndim >= 3, "Data array is not 3D."
         self.__setattr__(label, data)
         self.labels.append(label)
 
@@ -108,8 +109,9 @@ class Grid:
         save_dict = dict((k, self.__getattribute__(k)) for k in self.labels)
         save_grid(filename, self, **save_dict)
 
-    def save_density(self, label: str, filename: str):
-        save_grid(filename, self, **{label: self.__getattribute__(label)})
+    def save_density(self, *labels: str, filename: str):
+        kwargs = {label: self.__getattribute__(label) for label in labels}
+        save_grid(filename, self, **kwargs)
 
     def set_zref(self, zref: float):
         zref_ = self.zref
@@ -134,6 +136,39 @@ class Grid:
         for x,y,z in it:
             res[it.multi_index] = interp.ip(list([x,y,z]))
         self.set_density(label,res)
+    
+    def interpolate_data(self, data):
+        import tricubic
+        interp = tricubic.tricubic(list(data.data), list(data.shape))
+        x_min, x_max  = data.x_.min(), data.x_.max() + data.dr[0]
+        y_min, y_max  = data.y_.min(), data.y_.max() + data.dr[1]
+        z_min, z_max  = data.z.min(), data.z.max()
+        idx =  [(self.x_ >= x_min) & (self.x_ <= x_max),
+                (self.y_ >= y_min) & (self.y_ <= y_max),
+                (self.z >= z_min) & (self.z <= z_max)]
+        tip_pos = self.tip
+        tip_pos = tip_pos[idx[0],...]
+        tip_pos = tip_pos[:,idx[1],...]
+        tip_pos = tip_pos[...,idx[2],:]
+        X = np.repeat(self.x[...,np.newaxis], len(self.z), axis=2)  - x_min
+        Y = np.repeat(self.y[...,np.newaxis], len(self.z), axis=2)  - y_min
+        Z = np.ones(self.shape) * self.z - z_min
+        nX  = (X + tip_pos[...,0])/data.dr[0]
+        nY  = (Y + tip_pos[...,1])/data.dr[1]
+        nZ  = (Z + tip_pos[...,2])/data.dr[2]
+        res = np.zeros(tip_pos.shape[:-1])
+        it  = np.nditer([nX,nY,nZ], flags=['multi_index'])
+        for x,y,z in it:
+            res[it.multi_index] = interp.ip(list([x,y,z]))
+        new = self.copy()
+        if new.shape != res.shape:
+            new.shape   = res.shape
+            new.x       = self.x[idx[0]]
+            new.y       = self.y[idx[1]]
+            new.z       = self.z[idx[2]]
+            new.grid    = [new.x, new.y, new.z]
+        new.data    = res
+        return new
 
     # def replicate(self, *n, axis=(0, 1)):
     #     assert len(n) == 3, "Replication requires an argument for each axis."

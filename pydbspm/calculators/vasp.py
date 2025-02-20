@@ -1,11 +1,16 @@
 from re import compile, M
 from pathlib import Path
 from argparse import Namespace
-from numpy import array, empty, int32
+import numpy as np
+from numpy import array, empty, int32, linalg
 from scipy.ndimage.filters import uniform_filter1d
 from ase.calculators.vasp import Vasp, VaspChargeDensity
 from ase.io.vasp import read_vasp
+from ase.io import read
 from ase import Atoms
+from vaspwfc import vaspwfc
+from time import gmtime, strftime
+from scipy.ndimage import gaussian_filter
 
 from pydbspm.grid import Grid, neutralize_charge, filter_neg, threeAxis, threeN
 
@@ -335,3 +340,138 @@ def get_zval(outcar: str):
                 break
         Exception("ZVAL not found in OUTCAR.")
     return zval
+
+
+""" def constant_height(ldos, z, cell, zref=0, repeat=(1,1)):
+    z0 = zref + z
+    nz = ldos.shape[2]
+    ldos_ = ldos.reshape((-1, nz))
+
+    I = np.empty(ldos_.shape[0])
+
+    zp = z0 / cell[2, 2] * nz
+    zp = int(zp) % nz
+
+    for i, a in enumerate(ldos_):
+        I[i] = a[zp]
+
+    s0 = I.shape = ldos.shape[:2]
+    I = np.tile(I, repeat)
+    s = I.shape
+
+    ij = np.indices(s, dtype=float).reshape((2, -1)).T
+    x, y = np.dot(ij / s0, cell[:2, :2]).T.reshape((2,) + s)
+    return x, y, I """
+
+    
+""" def constant_height(self, channel, z, zref=0, repeat=(1,1)):
+    x, y, I = constant_height(
+        self.__getattribute__(channel),
+        z,
+        self.atoms.cell,
+        zref=zref,
+        repeat=repeat
+        )
+    return x, y, I """
+
+def read_wfc(atoms,directory):
+        wfc = vaspwfc(directory/"WAVECAR")
+        shape = wfc.wfc_r(1,1,1).shape
+        dr = linalg.norm(atoms.cell, axis=1)/shape
+        return wfc, shape, dr
+
+def get_bias(bias):
+    if bias < 0:
+        emin = bias
+        emax = 0.0
+    else:
+        emin = 0
+        emax = bias
+    return emin, emax
+
+def get_calc(directory='.'):
+        '''We are going to try to read all the parameters we need
+        from the vasprun.xml file. This is not always posible for
+        the k-point weights and the Fermi level. If we fail in
+        reading any of those from the xml, we are going to fallback to the ASE vasp calculator that will try to read IBZKPT and
+        the OUTCAR to get each parameter.
+
+        P.s. ASE has a bug when trying to get the kpoint weights, it
+        does not read the IBZKPT in the right directory with the
+        built-in get_k_point_weights method. We need to use the
+        function directly.'''
+        atoms = read(str(directory)+'/vasprun.xml')
+        calc = atoms.calc
+        c = Vasp(directory=directory)
+        try:
+            weights = calc.get_k_point_weights()
+        except:
+            try:
+                weights = c.read_k_point_weights("IBZKPT")
+            except FileNotFoundError:
+                print(f'{directory}/IBZKPT not found. Assuming single k-point with weight=[1]. Make sure this behavior is expected!!!')
+                weights = [1]
+        nkpts = len(weights)
+        # The xml ASE calculator does not return an exception if it
+        # does not find the fermi level.
+        Ef = calc.get_fermi_level()
+        if not Ef:
+            Ef = c.read_fermi()
+        nspins = calc.get_number_of_spins()
+        #self.nbands = self.calc.get_number_of_bands()
+        eigs = np.array([[calc.get_eigenvalues(k, s)
+                    for k in range(nkpts)]
+                    for s in range(nspins)]) - Ef
+        
+        return atoms, nkpts, weights, Ef, eigs
+
+def set_stm(bias, eigs, symmetries=[]):
+    symmetries = symmetries
+    emin, emax = get_bias(bias)
+    skn = ((eigs < emax) & (emin < eigs)).nonzero()
+    eigs_ = eigs[skn]
+    return skn, eigs_
+
+
+def get_stm(bias, directory, s=True, p=True, ws=0.5, wp=0.5, split=True, sigma=None, verbose=False):
+
+    
+    atoms, nkpts, weights, Ef, eigs = get_calc(directory)
+    skn, eigs_ = set_stm(bias,eigs)
+    wfc,shape,dr = read_wfc(atoms,directory)
+
+    grid = Grid(shape,
+                atoms.cell,
+                numbers=atoms.numbers,
+                positions=atoms.positions)
+
+    ldos = np.zeros(shape)
+    if split:
+        ldos_p = np.zeros(shape)
+    if verbose:
+        print(strftime("Reading wavefunctions and making operations... (%H:%M:%S)", gmtime()))
+        print(f'Number of kpoints: {nkpts}')
+        print(f'Fermi level: {Ef} eV')
+        print(f'Number of bands inside E_int: {len(eigs_)}')
+    for s_, k_, n_ in zip(*skn):
+        psi = wfc.wfc_r(s_+1,k_+1,n_+1)
+        if s:
+            ldos += ws * weights[k_] * (psi * np.conj(psi)).real
+        if p:
+            psi_dx = (np.roll(psi, -1, axis=0) - np.roll(psi, 1, axis=0))\
+                        / (2 * dr[0])
+            psi_dy = (np.roll(psi, -1, axis=1) - np.roll(psi, 1, axis=1))\
+                        / (2 * dr[1])
+            p_ = wp * weights[k_] * (psi_dx * np.conj(psi_dx) + psi_dy * np.conj(psi_dy)).real
+            if sigma:
+                p_ = gaussian_filter(p_, sigma=sigma, mode='wrap')
+            if split:
+                ldos_p += p_
+            else:
+                ldos += p_
+    if verbose: print(strftime("... done. (%H:%M:%S)", gmtime()))
+
+    if split:
+        return grid, atoms, ldos, ldos_p
+    else:
+        return grid, atoms, ldos, ldos
