@@ -43,6 +43,7 @@ class Grid:
         self.origin = origin
         self.span = span
         self.shape = shape
+        self.zref = None
 
         if (zref is None) and (atoms is not None):
             il, _ = get_layers(atoms, layer_idx, tolerance=layer_tol)
@@ -74,7 +75,7 @@ class Grid:
                 print("Setting origin and span from cell.")
             self.origin = np.array([0.0, 0.0, 0.0])
             self.span = self.cell
-            if zref is None:
+            if self.zref is None:
                 self.zref = 0.0
 
         self.x, self.y, self.z, self.dr, self.dR, self.ortho, self.lvec = get_grid(
@@ -101,7 +102,7 @@ class Grid:
                     f"Density labeled {label} already exists. Choose a different label or set `safe=False`"
                 )
                 pass
-        assert data.ndim >= 3, "Data array is not 3D."
+        assert data.ndim == 3, "Data array is not 3D."
         self.__setattr__(label, data)
         self.labels.append(label)
 
@@ -187,8 +188,6 @@ class Grid:
 def save_grid(filename, grid: Grid, **kwargs: threeD):
     if kwargs:
         for v in kwargs.values():
-            print(f"v.shape: {v.shape}")
-            print(f"grid.shape: {grid.shape}")
             assert np.equal(v.shape, grid.shape).all(), "Shape mismatch."
     else:
         kwargs = {}

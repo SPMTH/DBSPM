@@ -595,9 +595,11 @@ if steps.relax:
             f"> Saving relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz array..."
         )
         relax_grid.set_density("E", E)
-        relax_grid.set_density("tip",T)
+        relax_grid.set_density("tip_x", T[0])
+        relax_grid.set_density("tip_y", T[1])
+        relax_grid.set_density("tip_z", T[2])
         relax_grid.save_density(
-            "E","tip", filename=f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
+            "E","tip_x", "tip_y", "tip_z", filename=f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
         )
         steptime['relax'] = dt.now() - trelax
 
