@@ -9,7 +9,7 @@ from mpi4py import MPI
 from tricubic import tricubic
 from pathlib import Path
 from ase.io import read
-from pydbspm.grid import sph2cart, get_grid_from_params
+from pydbspm.grid import sph2cart, get_grid_from_params, read_grid, interpolate_data
 from pydbspm.input_parser import parse_params, default_params
 from pydbspm.calculate import DensityCalculator
 from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z
@@ -595,9 +595,11 @@ if steps.relax:
             f"> Saving relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz array..."
         )
         relax_grid.set_density("E", E)
-        relax_grid.set_density("tip",T)
+        relax_grid.set_density("tip_x",cartpos[0])
+        relax_grid.set_density("tip_y",cartpos[1])
+        relax_grid.set_density("tip_z",cartpos[2])
         relax_grid.save_density(
-            "E","tip", filename=f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
+            "E","tip_x","tip_y","tip_z", filename=f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
         )
         steptime['relax'] = dt.now() - trelax
 
@@ -619,47 +621,35 @@ if steps.stm:
         gridsp.set_density("s",s)
         gridsp.set_density("p",p)
         
-        gridsp.save_density("s", "p", filename=f"stm_{params.LABEL}_V{options.bias}.npz")
+        gridsp.save_density("s", "p", filename=f"stm_{params.LABEL}_V{options.bias:.3f}.npz")
         
         print("STM calculated.")
         steptime['stm'] = dt.now() - tstm
 
+    comm.Barrier()
+
 if steps.brstm:
     if rank == 0:
+        tbrstm = dt.now()
         from scipy.ndimage import gaussian_filter
         print("Calculating BRSTM image.")
         tbrstim = dt.now()
-        wd = Path(options.dir)
-        if denscalc.gridS is None:
-            denscalc.load_sample()
-        if denscalc.grid is None:
-            denscalc.set_calculation_grid()
-
-        gridS = denscalc.gridS
-        relax_grid, rlx_idx, nbox = get_grid_from_params(
-            params,
-            gridS,
-            nidx=True,
-            nbox=True,
-            numbers=gridS.numbers,
-            positions=gridS.positions,
-        )
-        if tip is not None:
-            relax_grid.set_density("tip",tip)
-        else:
-            relax_grid.set_density("tip",np.load(f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")['tip'])
         
-        if gridsp is None:
-            stm = np.load(f"stm_{params.LABEL}_V{options.bias}.npz")
-            stm_s = SPMGrid(stm['s'],'s',atoms=read(wd/'CONTCAR'),get_grid_from_atoms=True)
-            stm_p = SPMGrid(gaussian_filter(stm['p'],sigma=2,mode='wrap'),'p',atoms=read(wd/'CONTCAR'),grid_from_atoms=True)
-            stm = stm_s + stm_p
-        else:
-            stm = gridsp
+        label = params.LABEL
+        rpivot = params.RPIVOT
 
-        brstm = relax_grid.interpolate_data(stm)
+        relax = read_grid(f"relax_{label}_k{params.K:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")
+        stm = read_grid(f"stm_{label}_V{options.bias:.3f}.npz",get_grid_from_atoms=True,atoms=read(params.SAMPLE/"CONTCAR"))
+        stm.set_density('sp',stm.s+gaussian_filter(stm.p,sigma=2,mode='wrap'))        
 
-        brstm.save_density("sp", filename=f"brstm_{params.LABEL}_V{options.bias}.npz")
+        brstm = interpolate_data(relax,stm,'sp',params.RPIVOT)
+
+        brstm.save_density('data',filename=f"brstm_{label}_V{options.bias:.3f}.npz")
+        
+        print("BRSTM calculated.")
+        steptime['brstm'] = dt.now() - tbrstm
+
+    comm.Barrier()
         
 
        

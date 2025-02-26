@@ -9,6 +9,7 @@ from scipy.special import gammainc
 from ase.atoms import Atoms
 from ase.geometry import get_layers
 from ase.units import Bohr
+import copy
 
 threeD = Annotated[ArrayLike, Literal["N", "N", "N"]]
 threeAxis = Annotated[ArrayLike, Literal[3]]
@@ -29,7 +30,6 @@ class Grid:
         atoms=None,
         layer_idx=(0, 0, 1),
         layer_tol=0.1,
-        params=None,
         positions=None,
         numbers=None,
         verbose=False,
@@ -43,6 +43,7 @@ class Grid:
         self.origin = origin
         self.span = span
         self.shape = shape
+        self.zref = None
 
         if (zref is None) and (atoms is not None):
             il, _ = get_layers(atoms, layer_idx, tolerance=layer_tol)
@@ -55,7 +56,7 @@ class Grid:
                 print("Setting origin and span from input.")
             self.origin = origin
             self.span = span
-            if zref:
+            if zref is not None:
                 self.zref = zref
                 self.z0 = self.origin[2] - self.zref
                 self.zf = self.z0 + self.span[2]
@@ -74,7 +75,7 @@ class Grid:
                 print("Setting origin and span from cell.")
             self.origin = np.array([0.0, 0.0, 0.0])
             self.span = self.cell
-            if zref is None:
+            if self.zref is None:
                 self.zref = 0.0
 
         self.x, self.y, self.z, self.dr, self.dR, self.ortho, self.lvec = get_grid(
@@ -101,7 +102,7 @@ class Grid:
                     f"Density labeled {label} already exists. Choose a different label or set `safe=False`"
                 )
                 pass
-        assert data.ndim >= 3, "Data array is not 3D."
+        assert data.ndim == 3, "Data array is not 3D."
         self.__setattr__(label, data)
         self.labels.append(label)
 
@@ -136,38 +137,9 @@ class Grid:
         for x,y,z in it:
             res[it.multi_index] = interp.ip(list([x,y,z]))
         self.set_density(label,res)
-    
-    def interpolate_data(self, data):
-        import tricubic
-        interp = tricubic.tricubic(list(data.data), list(data.shape))
-        x_min, x_max  = data.x_.min(), data.x_.max() + data.dr[0]
-        y_min, y_max  = data.y_.min(), data.y_.max() + data.dr[1]
-        z_min, z_max  = data.z.min(), data.z.max()
-        idx =  [(self.x_ >= x_min) & (self.x_ <= x_max),
-                (self.y_ >= y_min) & (self.y_ <= y_max),
-                (self.z >= z_min) & (self.z <= z_max)]
-        tip_pos = self.tip
-        tip_pos = tip_pos[idx[0],...]
-        tip_pos = tip_pos[:,idx[1],...]
-        tip_pos = tip_pos[...,idx[2],:]
-        X = np.repeat(self.x[...,np.newaxis], len(self.z), axis=2)  - x_min
-        Y = np.repeat(self.y[...,np.newaxis], len(self.z), axis=2)  - y_min
-        Z = np.ones(self.shape) * self.z - z_min
-        nX  = (X + tip_pos[...,0])/data.dr[0]
-        nY  = (Y + tip_pos[...,1])/data.dr[1]
-        nZ  = (Z + tip_pos[...,2])/data.dr[2]
-        res = np.zeros(tip_pos.shape[:-1])
-        it  = np.nditer([nX,nY,nZ], flags=['multi_index'])
-        for x,y,z in it:
-            res[it.multi_index] = interp.ip(list([x,y,z]))
-        new = self.copy()
-        if new.shape != res.shape:
-            new.shape   = res.shape
-            new.x       = self.x[idx[0]]
-            new.y       = self.y[idx[1]]
-            new.z       = self.z[idx[2]]
-            new.grid    = [new.x, new.y, new.z]
-        new.data    = res
+
+    def copy(self):
+        new = copy.deepcopy(self)
         return new
 
     # def replicate(self, *n, axis=(0, 1)):
@@ -187,8 +159,6 @@ class Grid:
 def save_grid(filename, grid: Grid, **kwargs: threeD):
     if kwargs:
         for v in kwargs.values():
-            print(f"v.shape: {v.shape}")
-            print(f"grid.shape: {grid.shape}")
             assert np.equal(v.shape, grid.shape).all(), "Shape mismatch."
     else:
         kwargs = {}
@@ -332,6 +302,63 @@ def read_rhoS(params: Namespace) -> Tuple[threeD, Grid]:
         numbers=sample["numbers"],
     )
     return rhoS, gridS
+
+def read_grid(filename,get_grid_from_atoms=False,atoms=None):
+    file = np.load(filename)
+    if get_grid_from_atoms:
+        zref = None
+    else:
+        zref = file['zref']
+    grid = Grid(shape=file['shape'],
+                span=file['span'],
+                origin=file['origin'],
+                cell=file['cell'],
+                numbers=file['numbers'],
+                positions=file['positions'],
+                zref=zref,
+                atoms=atoms)
+    for a in file.files:
+        if a not in ['shape','span','origin','ortho','cell','numbers','positions','zref']:
+            grid.set_density(a,file[a])
+    return grid
+
+def interpolate_data(grid_new, grid_data,label,rpivot=3.02):
+    import tricubic
+    interp = tricubic.tricubic(list(grid_data.__getattribute__(label)), list(grid_data.shape))
+    x_ = np.linalg.norm([grid_data.x[:, 0], grid_data.y[:, 0]], axis=0)
+    y_ = np.linalg.norm([grid_data.x[0, :], grid_data.y[0, :]], axis=0)
+    grid_new.x_ = np.linalg.norm([grid_new.x[:, 0], grid_new.y[:, 0]], axis=0)
+    grid_new.y_ = np.linalg.norm([grid_new.x[0, :], grid_new.y[0, :]], axis=0)
+    x_min, x_max = x_.min(), x_.max() + grid_data.dr[0]
+    y_min, y_max = y_.min(), y_.max() + grid_data.dr[1]
+    z_min, z_max = grid_data.z.min(), grid_data.z.max()
+    idx = [(grid_new.x_ >= x_min) & (grid_new.x_ <= x_max),
+            (grid_new.y_ >= y_min) & (grid_new.y_ <= y_max),
+            (grid_new.z >= z_min) & (grid_new.z <= z_max)]
+    tip_pos = np.array([grid_new.tip_x, grid_new.tip_y, grid_new.tip_z])
+    tip_pos[2, ...] += rpivot
+    tip_pos = tip_pos[:,idx[0], ...]
+    tip_pos = tip_pos[..., idx[1],:]
+    tip_pos = tip_pos[..., idx[2]]
+    X = np.repeat(grid_new.x[..., np.newaxis], len(grid_new.z), axis=2) - x_min
+    Y = np.repeat(grid_new.y[..., np.newaxis], len(grid_new.z), axis=2) - y_min
+    Z = np.ones(grid_new.shape) * grid_new.z - z_min
+    nX = (X + tip_pos[0,...]) / grid_data.dr[0]
+    nY = (Y + tip_pos[1,...]) / grid_data.dr[1]
+    nZ = (Z + tip_pos[2,...]) / grid_data.dr[2]
+    res = np.zeros(tip_pos.shape[1:])
+    it = np.nditer([nX, nY, nZ], flags=['multi_index'])
+    for x, y, z in it:
+        res[it.multi_index] = interp.ip(list([x, y, z]))
+    new =  copy.deepcopy(grid_new)
+    if (new.shape != res.shape).any():
+        new.shape = res.shape
+        new.x = grid_new.x[idx[0]]
+        new.y = grid_new.y[idx[1]]
+        new.z = grid_new.z[idx[2]]
+        new.grid = [new.x, new.y, new.z]
+    new.set_density('data',res)
+    return new
 
 
 @jit(nopython=True)

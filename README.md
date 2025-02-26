@@ -50,6 +50,7 @@ The program files are organized in the following way:
 |------ SPMGrid.py
 |------ tools.py
 |--- example/
+|--- brstm_example/
 |--- scripts/
 |------ fdbmfit
 |------ vaspfz
@@ -68,6 +69,9 @@ The most important files are:
 
 - `example/`:
   A folder with the example of how to use the package.
+
+- `brstm_example/`':
+  A folder with the example of how to use the package with stm and brstm calculations.
 
 - `scripts/vaspfz`:
   A script to automate a Force spectroscopy with VASP to fit the FDBM parameters.
@@ -100,6 +104,7 @@ PIP will try to install all the dependencies, but it may fail. In this case, you
     - mpi4py
     - dftd3
     - tricubic
+    - vaspwfc
 
 ### Environment Setup
 
@@ -111,7 +116,7 @@ See ASE documentation for more information.
 
 ## Usage
 
-We recommend using the notebook `DBSPM_Basic_Quick-start.ipynb` in the `example/` folder to learn how to use the package. The notebooks are divided into two parts: the simulation and the analysis of the data.
+We recommend using the notebook `DBSPM_Basic_Quick-start.ipynb` in the `example/` folder to learn how to use the package. The notebooks are divided into two parts: the simulation and the analysis of the data. To use stm and brstm, use the notebook `DBSPM-BRSTM_Basic_Quick-start.ipynb` in the `brstm_example/` folder
 
 ### The dbspm command
 
@@ -138,8 +143,8 @@ Note that any option provided in the command line will override the values in th
 - `es`: Calculates the electrostatic interaction.
 - `vdw`: Calculates the van der Waals interaction with DFTD3.
 - `relax`: Relax the probe position on the static potential.
-- `stm`: Calculates the STM *s* and *p*-wave components. (To be available)
-- `brstm`: Approximates the bond-resolved STM signal with the HR-AFM and STM data. (To be available)
+- `stm`: Calculates the STM *s* and *p*-wave components. 
+- `brstm`: Approximates the bond-resolved STM signal with the HR-AFM and STM data. 
 
 #### Step aliases
 

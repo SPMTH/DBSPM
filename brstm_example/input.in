@@ -1,0 +1,38 @@
+# Example input
+## Required params
+LABEL   = triangulene
+Z0      = 2.5
+ZF      = 5.0
+### optional
+ZREF   = 3.0
+
+CMD = mpirun vasp_gam
+PSEUDOS = potpaw_PBE.54
+SAMPLEGRID = True
+TIPGRID = True
+
+## Relaxation params
+ALPHA   = 1.08
+V       = 42.9071
+
+OPT = False
+
+&SITES
+N        6.7296     5.932899
+C        8.0878     5.898899
+H        8.572899   4.999999
+C1       8.1089     8.3219
+N-C      7.4087     5.915899
+C-C      8.450949   6.501849
+hollow   7.410616   7.11245
+lp       6.1965     5.049
+
+&VASP
+$NPAR = 8
+$SIGMA = 0.1
+$IBRION = 1
+$IDIPOL = 3
+$ISMEAR = 0
+$ISPIN = 2
+$NUPDOWN = 2
+$LORBIT = 11
