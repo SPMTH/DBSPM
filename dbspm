@@ -10,7 +10,7 @@ from tricubic import tricubic
 from pydbspm.grid import sph2cart, get_grid_from_params
 from pydbspm.input_parser import parse_params, default_params
 from pydbspm.calculate import DensityCalculator
-from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z
+from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z, relax_noortho_tip_z
 from pydbspm.setup_calculation import setup_calc, mpirequired
 
 t = dt.now()
@@ -543,8 +543,13 @@ if steps.relax:
         if rank == 0:
             print("< done.\n")
     else:
-        print("not implemented... Exiting.")
-        Exception("Not implemented.")
+        if rank == 0:
+            print("> Energy minimization for non orthogonal cell.")
+        for i, j, res in it:
+            res[...] = relax_noortho_tip_z(i, j, inter_E, kappa, npivot, zi, dr, dR, method)
+        res = it.operands[2]
+        if rank == 0:
+            print("< done.\n")
 
     if size > 1:
         rec_data = comm.gather(res, root=0)
