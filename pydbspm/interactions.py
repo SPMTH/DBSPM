@@ -85,6 +85,25 @@ def relax_tip_z(i, j, interpE, kappa, npivot, zi, dr, method="Powell"):
     arr = z_it.operands[1][::-1]
     return arr
 
+def relax_noortho_tip_z(i, j, interpE, kappa, npivot, zi, dr, dR, method="Powell"):
+    origin = np.array([i, j, 0])
+    guess = [np.pi, 0]
+    rpivot = npivot * dr[2]
+    z_it = np.nditer([zi[::-1], None], op_dtypes=[int, (float, (3))])
+    for k, r in z_it:
+        origin[2] = k + npivot
+        emin = minimize(
+            Emin_norm,
+            guess,
+            method=method,
+            #                                bounds=[(np.pi/2,np.pi), (0,2*np.pi)],
+            args=(interpE.ip, origin, kappa, rpivot, dr, dR),
+        )
+        guess = emin.x
+        r[...] = [emin.fun, *guess]
+    arr = z_it.operands[1][::-1]
+    return arr
+
 
 @jit(nopython=True)
 def spring_energy_half_kappa(pi_th, half_kappa):

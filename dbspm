@@ -7,11 +7,14 @@ from importlib import import_module
 import numpy as np
 from mpi4py import MPI
 from tricubic import tricubic
-from pydbspm.grid import sph2cart, get_grid_from_params
+from pathlib import Path
+from ase.io import read
+from pydbspm.grid import sph2cart, get_grid_from_params, read_grid, interpolate_data
 from pydbspm.input_parser import parse_params, default_params
 from pydbspm.calculate import DensityCalculator
 from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z, relax_noortho_tip_z
 from pydbspm.setup_calculation import setup_calc, mpirequired
+from pydbspm.calculators.vasp import get_stm
 
 t = dt.now()
 t_str = t.strftime("%Y-%m-%d %H:%M:%S")
@@ -158,6 +161,34 @@ if rank == 0:
         default=False,
         help="Save also a vdw datafile of the reduced grid where it has been calculated using DFTD3 (default only saves data in the full grid).")
 
+    parser.add_argument(
+        "-d",
+        "--dir",
+        action="store",
+        type=str,
+        default='sample',
+        help='WAVECAR directory for stm calculation'
+    )
+
+    parser.add_argument(
+        "-b",
+        "--bias",
+        action='store',
+        type=float,
+        default=0.5,
+        help='STM bias (V).'
+    )
+
+    parser.add_argument(
+        "-w",
+        "--weight",
+        action='store',
+        type=float,
+        default=0.5,
+        help='weight of the s orbital in the BRSTM calculation.'
+    )
+
+
     options = parser.parse_args()
 
     print("Density-based SPM")
@@ -299,7 +330,7 @@ if steps.sr:
         sr = sr[denscalc.nidx]
         denscalc.grid.set_density("sr", sr)
         print(f"- Saving {params.LABEL}_sr_a{params.ALPHA:.2f}.npz")
-        denscalc.grid.save_density("sr", params.LABEL + f"_sr_a{params.ALPHA:.2f}.npz")
+        denscalc.grid.save_density("sr", filename=params.LABEL + f"_sr_a{params.ALPHA:.2f}.npz")
         steptime['sr'] = dt.now() - tsr
         print("< done.\n")
     comm.Barrier()
@@ -318,7 +349,7 @@ if steps.es:
         es = es[denscalc.nidx]
         denscalc.grid.set_density("es", es)
         print(f"- Saving {params.LABEL}_es.npz")
-        denscalc.grid.save_density("es", params.LABEL + f"_es.npz")
+        denscalc.grid.save_density("es", filename=params.LABEL + f"_es.npz")
         steptime['es'] = dt.now() - tes
         print("< done.\n")
     comm.Barrier()
@@ -423,11 +454,11 @@ if steps.vdw:
         if not options.full_vdw:
             vdwgrid.set_density("vdw", gatherE)
             if options.save_stride_vdw:
-                vdwgrid.save_density("vdw", params.LABEL + "_stride_vdw.npz")
+                vdwgrid.save_density("vdw", filename=params.LABEL + "_stride_vdw.npz")
             denscalc.grid.interpolate_density(vdwgrid,"vdw")
         else:
             denscalc.grid.set_density("vdw",gatherE)
-        denscalc.grid.save_density("vdw", params.LABEL + "_vdw.npz")
+        denscalc.grid.save_density("vdw", filename=params.LABEL + "_vdw.npz")
         steptime['vdw'] = dt.now() - tvdw
         print("< array saved.\n")
 
@@ -578,8 +609,11 @@ if steps.relax:
             f"> Saving relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz array..."
         )
         relax_grid.set_density("E", E)
+        relax_grid.set_density("tip_x",cartpos[0])
+        relax_grid.set_density("tip_y",cartpos[1])
+        relax_grid.set_density("tip_z",cartpos[2])
         relax_grid.save_density(
-            "E", f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
+            "E","tip_x","tip_y","tip_z", filename=f"relax_{label}_k{kappa:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz"
         )
         steptime['relax'] = dt.now() - trelax
 
@@ -587,13 +621,55 @@ if steps.relax:
 
 if steps.stm:
     if rank == 0:
+        tstm = dt.now()
         print("Calculating STM data.")
-        print("not implemented... Exiting.")
+        wd = Path(options.dir)
+
+        print(f"Bias: {options.bias:.3f} V")
+        print(f'Dir: {wd}')
+
+        gridsp, atoms,s,p = get_stm(bias=options.bias,directory=wd)
+        print(f"Bias: {options.bias:.3f} V")
+
+
+        gridsp.set_density("s",s)
+        gridsp.set_density("p",p)
+        
+        gridsp.save_density("s", "p", filename=f"stm_{params.LABEL}_V{options.bias:.3f}.npz")
+        
+        print("STM calculated.")
+        steptime['stm'] = dt.now() - tstm
+
+    comm.Barrier()
 
 if steps.brstm:
     if rank == 0:
+        tbrstm = dt.now()
+        from scipy.ndimage import gaussian_filter
         print("Calculating BRSTM image.")
-        print("not implemented... Exiting.")
+        tbrstim = dt.now()
+        
+        label = params.LABEL
+        rpivot = params.RPIVOT
+
+        relax = read_grid(f"relax_{label}_k{params.K:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")
+        print('Getting tip position from '+f"relax_{label}_k{params.K:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")
+        stm = read_grid(f"stm_{label}_V{options.bias:.3f}.npz",get_grid_from_atoms=True,atoms=read(params.SAMPLE/"CONTCAR"))
+        ws = options.weight
+        wp = 1 - ws
+        stm.set_density('sp',ws*stm.s+gaussian_filter(wp*stm.p,sigma=2,mode='wrap'))        
+
+        brstm = interpolate_data(relax,stm,'sp',params.RPIVOT)
+
+        brstm.save_density('data',filename=f"brstm_{label}_V{options.bias:.3f}_ws{ws:.2f}.npz")
+        
+        print("BRSTM calculated.")
+        steptime['brstm'] = dt.now() - tbrstm
+
+    comm.Barrier()
+        
+
+       
 
 if rank == 0:
     t_ = dt.now()

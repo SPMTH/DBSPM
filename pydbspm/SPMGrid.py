@@ -429,7 +429,7 @@ position array shape {tip_shape}')
         return new
 
     def __str__(self):
-        string = f'AFMGrid(Label: {self.label}, z-min: {self.z.min():.4f}, \
+        string = f'STMGrid(Label: {self.label}, z-min: {self.z.min():.4f}, \
 z-max: {self.z.max():.4f}, dz: {self.dr[2]:.4f}, zref: {self.zref:.4f}, min. \
 value: {self.data.min():.2e}, max. value: {self.data.max():.2e}'
 
