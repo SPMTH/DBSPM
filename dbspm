@@ -574,8 +574,6 @@ if steps.relax:
         if rank == 0:
             print("< done.\n")
     else:
-        #print("not implemented... Exiting.")
-        #Exception("Not implemented.")
         if rank == 0:
             print("> Energy minimization for non orthogonal cell.")
         for i, j, res in it:
