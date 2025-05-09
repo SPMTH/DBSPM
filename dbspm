@@ -12,10 +12,9 @@ from ase.io import read
 from pydbspm.grid import sph2cart, get_grid_from_params, read_grid, interpolate_data
 from pydbspm.input_parser import parse_params, default_params
 from pydbspm.calculate import DensityCalculator
-from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z
+from pydbspm.interactions import get_density_overlap, get_dftd3_api_grid, relax_tip_z, relax_noortho_tip_z
 from pydbspm.setup_calculation import setup_calc, mpirequired
 from pydbspm.calculators.vasp import get_stm
-from pydbspm.SPMGrid import SPMGrid
 
 t = dt.now()
 t_str = t.strftime("%Y-%m-%d %H:%M:%S")
@@ -179,6 +178,16 @@ if rank == 0:
         default=0.5,
         help='STM bias (V).'
     )
+
+    parser.add_argument(
+        "-w",
+        "--weight",
+        action='store',
+        type=float,
+        default=0.5,
+        help='weight of the s orbital in the BRSTM calculation.'
+    )
+
 
     options = parser.parse_args()
 
@@ -565,8 +574,15 @@ if steps.relax:
         if rank == 0:
             print("< done.\n")
     else:
-        print("not implemented... Exiting.")
-        Exception("Not implemented.")
+        #print("not implemented... Exiting.")
+        #Exception("Not implemented.")
+        if rank == 0:
+            print("> Energy minimization for non orthogonal cell.")
+        for i, j, res in it:
+            res[...] = relax_noortho_tip_z(i, j, inter_E, kappa, npivot, zi, dr, dR, method)
+        res = it.operands[2]
+        if rank == 0:
+            print("< done.\n")
 
     if size > 1:
         rec_data = comm.gather(res, root=0)
@@ -639,12 +655,15 @@ if steps.brstm:
         rpivot = params.RPIVOT
 
         relax = read_grid(f"relax_{label}_k{params.K:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")
+        print('Getting tip position from '+f"relax_{label}_k{params.K:.4f}_a{params.ALPHA:.2f}_V{params.V:.2f}.npz")
         stm = read_grid(f"stm_{label}_V{options.bias:.3f}.npz",get_grid_from_atoms=True,atoms=read(params.SAMPLE/"CONTCAR"))
-        stm.set_density('sp',stm.s+gaussian_filter(stm.p,sigma=2,mode='wrap'))        
+        ws = options.weight
+        wp = 1 - ws
+        stm.set_density('sp',ws*stm.s+gaussian_filter(wp*stm.p,sigma=2,mode='wrap'))        
 
         brstm = interpolate_data(relax,stm,'sp',params.RPIVOT)
 
-        brstm.save_density('data',filename=f"brstm_{label}_V{options.bias:.3f}.npz")
+        brstm.save_density('data',filename=f"brstm_{label}_V{options.bias:.3f}_ws{ws:.2f}.npz")
         
         print("BRSTM calculated.")
         steptime['brstm'] = dt.now() - tbrstm

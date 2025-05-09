@@ -8,7 +8,6 @@ from ase.calculators.vasp import Vasp, VaspChargeDensity
 from ase.io.vasp import read_vasp
 from ase.io import read
 from ase import Atoms
-from vaspwfc import vaspwfc
 from time import gmtime, strftime
 from scipy.ndimage import gaussian_filter
 
@@ -375,6 +374,7 @@ def get_zval(outcar: str):
     return x, y, I """
 
 def read_wfc(atoms,directory):
+        from vaspwfc import vaspwfc
         wfc = vaspwfc(directory/"WAVECAR")
         shape = wfc.wfc_r(1,1,1).shape
         dr = linalg.norm(atoms.cell, axis=1)/shape

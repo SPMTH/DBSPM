@@ -3,7 +3,7 @@ from scipy.optimize import minimize
 from numba import jit
 from dftd3.interface import DispersionModel, ZeroDampingParam
 from ase.units import Bohr, Ha
-from pydbspm.grid import sph2grid, sph2grid_opt
+from pydbspm.grid import sph2grid, sph2grid_opt, sph2cart
 
 
 def get_density_overlap(rho0, rho1, dr):
@@ -59,6 +59,13 @@ def Emin(pol, func, origin, kappa, rpivot, dr):
     sol = func(list(origin + sph2grid(th, az, rpivot, dr))) + spr
     return sol
 
+def Emin_norm(pol, func, origin, kappa, rpivot, dr, dR):
+    th = pol[0]
+    az = pol[1]
+    spr = spring_energy(th, kappa)
+    sol = func(list(origin + np.linalg.inv(dR.T).dot(sph2cart(th, az, rpivot)))) + spr
+    return sol
+
 
 def relax_tip_z(i, j, interpE, kappa, npivot, zi, dr, method="Powell"):
     origin = np.array([i, j, 0])
@@ -72,6 +79,25 @@ def relax_tip_z(i, j, interpE, kappa, npivot, zi, dr, method="Powell"):
             guess,
             method=method,
             args=(interpE.ip, origin, kappa, rpivot, dr),
+        )
+        guess = emin.x
+        r[...] = [emin.fun, *guess]
+    arr = z_it.operands[1][::-1]
+    return arr
+
+def relax_noortho_tip_z(i, j, interpE, kappa, npivot, zi, dr, dR, method="Powell"):
+    origin = np.array([i, j, 0])
+    guess = [np.pi, 0]
+    rpivot = npivot * dr[2]
+    z_it = np.nditer([zi[::-1], None], op_dtypes=[int, (float, (3))])
+    for k, r in z_it:
+        origin[2] = k + npivot
+        emin = minimize(
+            Emin_norm,
+            guess,
+            method=method,
+            #                                bounds=[(np.pi/2,np.pi), (0,2*np.pi)],
+            args=(interpE.ip, origin, kappa, rpivot, dr, dR),
         )
         guess = emin.x
         r[...] = [emin.fun, *guess]

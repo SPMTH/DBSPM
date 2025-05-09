@@ -231,8 +231,8 @@ def get_grid_from_params(
     span[1, 1] = bbox[1, 1] - bbox[0, 1]
     span[2, 2] = bbox[1, 2] - bbox[0, 2]
 
-    nspan = np.ceil(span / grid.dr).astype(int)
-    nbox_ = np.ceil(bbox / grid.dr).astype(int)
+    nspan = np.rint(span / grid.dr).astype(int)
+    nbox_ = np.rint(bbox / grid.dr).astype(int)
     nbox_[1, 2] = nbox_[0, 2] + nspan[2, 2]
 
     if reduce:
