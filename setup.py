@@ -9,7 +9,7 @@ setup(
         "scipy",
         "mpi4py",
         "dftd3",
-        "ase",
+        "ase==3.22.1",
         "pandas",
         "matplotlib",
         "tricubic",
