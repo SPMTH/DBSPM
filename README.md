@@ -99,7 +99,7 @@ PIP will try to install all the dependencies, but it may fail. In this case, you
     - NumPy
     - SciPy
     - pandas
-    - ASE
+    - ASE (Recommended 3.22.1)
     - Matplotlib
     - mpi4py
     - dftd3
