@@ -104,7 +104,7 @@ PIP will try to install all the dependencies, but it may fail. In this case, you
     - mpi4py
     - dftd3
     - tricubic
-    - vaspwfc
+    - vaspwfc (only required for stm and brstm calculations)
 
 ### Environment Setup
 
