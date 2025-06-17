@@ -13,6 +13,7 @@ setup(
         "pandas",
         "matplotlib",
         "tricubic",
+        "VaspBandUnfolding @ git+https://github.com/QijingZheng/VaspBandUnfolding",
     ],
     author="E. Ventura-Macias",
     scripts=["dbspm"],
