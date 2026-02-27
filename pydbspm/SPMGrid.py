@@ -219,12 +219,10 @@ different from number of locations specified ({len(n)}).')
             y_min = self.y_.min()
             z_min = self.z.min()
 
-            # Coordenadas físicas del plano
             X = x
             Y = y
             Z = np.ones_like(X) * z
 
-            # Coordenadas normalizadas del grid
             nX = (X - x_min) / self.dr[0]
             nY = (Y - y_min) / self.dr[1]
             nZ = (Z - z_min) / self.dr[2]
