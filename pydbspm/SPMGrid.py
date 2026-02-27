@@ -172,14 +172,12 @@ different from number of locations specified ({len(n)}).')
              show_atoms=False,
              atoms_size=100,
              center_zero=False,
+             interp=False,
              **kwargs):
         if not ax:
             ax = plt.gca()
             ax.set_aspect('equal')
-        nz = np.abs(self.z - z).argmin()
-        if (z - self.z.max()) > self.dr[2] / 2:
-            print(f'Provided z ({z}) is more than dz/2 higher than the maximum\
- z in this data set ({self.z.max():.4f}). Plotting the maximum z-distance...')
+            
         lims = []
         axis = []
         if xlim:
@@ -190,10 +188,56 @@ different from number of locations specified ({len(n)}).')
             axis += [1]
         if len(lims) > 0:
             idx, data = self.loc(*lims, axis=axis, index=True)
-            data = data[:, :, nz] * conv
         else:
             idx = (slice(None), slice(None))
-            data = self.data[:, :, nz] * conv
+        x = self.x[idx[:2]]
+        y = self.y[idx[:2]]
+
+        if not interp:
+
+            nz = np.abs(self.z - z).argmin()
+
+            if (z - self.z.max()) > self.dr[2] / 2:
+                print(f'Provided z ({z}) is more than dz/2 higher than the maximum '
+                    f'z in this data set ({self.z.max():.4f}). '
+                    'Plotting the maximum z-distance...')
+
+            data = self.data[:, :, nz][idx[:2]] * conv
+
+            z_used = self.z[nz]
+
+        else:
+
+            import tricubic
+
+            interp3d = tricubic.tricubic(
+                list(self.data),
+                list(self.data.shape)
+            )
+
+            x_min = self.x_.min()
+            y_min = self.y_.min()
+            z_min = self.z.min()
+
+            # Coordenadas físicas del plano
+            X = x
+            Y = y
+            Z = np.ones_like(X) * z
+
+            # Coordenadas normalizadas del grid
+            nX = (X - x_min) / self.dr[0]
+            nY = (Y - y_min) / self.dr[1]
+            nZ = (Z - z_min) / self.dr[2]
+
+            data = np.zeros_like(X)
+
+            it = np.nditer([nX, nY, nZ], flags=['multi_index'])
+            for xi, yi, zi in it:
+                data[it.multi_index] = interp3d.ip([xi, yi, zi])
+
+            data *= conv
+            z_used = z
+
         if sigma:
             data = gaussian_filter(data, sigma)
         if center_zero:
@@ -213,7 +257,7 @@ different from number of locations specified ({len(n)}).')
                         levels=levels,
                         **kwargs)
         if info:
-            print(f'z={self.z[nz]:.4f}, min={data.min():.4e}{units}, max=\
+            print(f'z={z_used:.4f}, min={data.min():.4e}{units}, max=\
 {data.max():.4e}{units}, range={data.max()-data.min():.4e}{units}')
         if scalebar:
             if not xlim: xlim = (self.x[0], self.x[-1])
